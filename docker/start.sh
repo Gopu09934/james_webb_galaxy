@@ -1,22 +1,59 @@
 #!/bin/bash
 
-set -e
+set -euo pipefail
 
-mkdir -p /app/videos
+# Validate required environment variables
+if [ -z "${VIDEO_URL:-}" ]; then
+    echo "ERROR: VIDEO_URL is not set"
+    exit 1
+fi
 
-echo "Downloading video..."
+if [ -z "${YOUTUBE_STREAM_KEY:-}" ]; then
+    echo "ERROR: YOUTUBE_STREAM_KEY is not set"
+    exit 1
+fi
 
-gdown "https://drive.google.com/uc?id=${GOOGLE_DRIVE_FILE_ID}" \
-      -O /app/videos/video.mp4
+echo "========================================"
+echo "Starting 24/7 YouTube Stream..."
+echo "========================================"
 
-echo "Starting stream..."
+# Split multiple URLs (comma-separated)
+IFS=',' read -ra URLS <<< "$VIDEO_URL"
 
-ffmpeg \
--re \
--stream_loop -1 \
--i /app/videos/video.mp4 \
--c:v libx264 \
--preset veryfast \
--c:a aac \
--f flv \
-"rtmp://a.rtmp.youtube.com/live2/${YOUTUBE_STREAM_KEY}"
+# Loop forever
+while true; do
+    for url in "${URLS[@]}"; do
+
+        echo "----------------------------------------"
+        echo "Streaming: $url"
+        echo "----------------------------------------"
+
+        ffmpeg \
+            -hide_banner \
+            -loglevel info \
+            -re \
+            -i "$url" \
+            -vf "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2" \
+            -r 30 \
+            -c:v libx264 \
+            -preset ultrafast \
+            -tune zerolatency \
+            -pix_fmt yuv420p \
+            -b:v 3000k \
+            -maxrate 3000k \
+            -bufsize 6000k \
+            -g 60 \
+            -keyint_min 60 \
+            -c:a aac \
+            -b:a 128k \
+            -ar 44100 \
+            -ac 2 \
+            -f flv \
+            "rtmp://a.rtmp.youtube.com/live2/${YOUTUBE_STREAM_KEY}" || true
+
+        echo "Finished: $url"
+        echo "Waiting 5 seconds before next video..."
+        sleep 5
+
+    done
+done
