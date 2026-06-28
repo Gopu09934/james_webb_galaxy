@@ -3,7 +3,7 @@ name: Stream
 on:
   workflow_dispatch:
   schedule:
-  - cron: "0 */5 * * *"
+    - cron: "0 */5 * * *"
 
 jobs:
   stream:
@@ -11,12 +11,14 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Build Docker
-        run: docker build -t yt-stream ./docker
+      - name: Build Docker image
+        run: |
+          docker build -t yt-stream ./docker
 
-      - name: Start Stream
+      - name: Start YouTube Stream
         run: |
           docker run \
             -e VIDEO_URL="${{ secrets.VIDEO_URL }}" \
