@@ -40,7 +40,7 @@ while true; do
 [video][overlay]overlay=0:0,\
 drawtext=fontfile=font.ttf:text='LIVE':fontcolor=red:fontsize=32:x=40:y=35,\
 drawtext=fontfile=font.ttf:text='Footage Courtesy: NASA & SpaceX':fontcolor=white:fontsize=22:x=40:y=685,\
-drawtext=fontfile=font.ttf:text='Your Channel Name':fontcolor=white:fontsize=24:x=1030:y=35" \
+drawtext=fontfile=font.ttf:text='Credits: NASA / SpaceX':fontcolor=white:fontsize=24:x=1030:y=35" \
 -r 30 \
 -c:v libx264 \
 -preset ultrafast \
