@@ -65,15 +65,6 @@ if [ "${#RAW_LINES[@]}" -eq 0 ]; then
     "The telescope's sunshield is the size of a tennis court and keeps its sensitive instruments extremely cold during observations."
     "Webb has revealed detailed structures inside planetary nebulae, showing how dying stars enrich space with essential elements."
     "Astronomers use Webb to investigate supermassive black holes that formed surprisingly early in the history of the Universe."
-    "Infrared images from Webb uncovered thousands of previously hidden galaxies within tiny regions of the night sky."
-    "Webb observed the atmosphere of giant exoplanets and detected carbon dioxide, methane, and water using advanced spectroscopic instruments."
-    "Scientists believe Webb will continue transforming astronomy by discovering unexpected cosmic objects and answering fundamental questions about space."
-    "The telescope helps researchers understand how galaxies merge, grow, and evolve through billions of years of gravitational interactions."
-    "Webb's observations provide valuable evidence about how the first stars ignited and illuminated the once-dark early Universe."
-    "The telescope studies icy moons, asteroids, and planets within our Solar System, revealing remarkable surface and atmospheric details."
-    "Webb identified young stellar disks containing the ingredients required for future planet formation around newly born stars."
-    "Astronomers combine Webb observations with Hubble data to create detailed multiwavelength views of galaxies, nebulae, and star clusters."
-    "Every new Webb observation expands humanity's understanding of the Universe, inspiring future discoveries about space, time, galaxies, and life."
 )
 fi
 
