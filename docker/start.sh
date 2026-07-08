@@ -89,7 +89,7 @@ for i in "${!RAW_LINES[@]}"; do
     start=$((i * SLOT))
     end=$((start + SLOT))
     nxt="h${idx}"
-    ALPHA="ALPHA="if(between(mod(t\,${CYCLE})\,${start}\,${end})\,1\,0)"
+    ALPHA="if(between(mod(t\,${CYCLE})\,${start}\,${end})\,1\,0)"
     CHAIN+="[${prev}]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/headline${idx}.txt:fontcolor=white:fontsize=30:line_spacing=14:x=50:y=300:alpha='${ALPHA}'[${nxt}];"
     prev="$nxt"
 done
