@@ -142,7 +142,7 @@ while true; do
         -loop 1 -i overlay.png \
         -filter_complex "$FILTER" \
         -r 30 \
-        -s 1280x720 \
+        -s 1920x1080 \
         -c:v libx264 \
         -preset veryfast \
         -profile:v high \
