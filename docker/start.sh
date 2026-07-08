@@ -36,6 +36,7 @@ printf "T O D A Y ' S   D I S C O V E R Y" > "$ASSET_DIR/header.txt"
 
 #############################################
 # Load headlines from galaxy_info.txt
+# (one headline per line, blank lines ignored)
 #############################################
 RAW_LINES=()
 if [ -f "$INFO_FILE" ]; then
@@ -44,6 +45,7 @@ if [ -f "$INFO_FILE" ]; then
     done < "$INFO_FILE"
 fi
 
+# Fallback if the file is missing or empty
 if [ "${#RAW_LINES[@]}" -eq 0 ]; then
     echo "WARNING: $INFO_FILE not found or empty — using default headlines."
     RAW_LINES=(
@@ -58,6 +60,7 @@ N=${#RAW_LINES[@]}
 CYCLE=$((N * SLOT))
 echo "Loaded $N headline(s) from $INFO_FILE — rotation cycle: ${CYCLE}s"
 
+# Wrap each headline to fit the panel width and write it to its own file
 for i in "${!RAW_LINES[@]}"; do
     idx=$((i + 1))
     echo "${RAW_LINES[$i]}" | fold -s -w 30 > "$ASSET_DIR/headline${idx}.txt"
@@ -80,18 +83,14 @@ CHAIN+="[p7]drawbox=x=50:y=210:w=420:h=2:color=white@0.35:t=fill[p8];"
 CHAIN+="[p8]drawbox=x=50:y=234:w=12:h=12:color=${GOLD}:t=fill[p9];"
 CHAIN+="[p9]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/header.txt:fontcolor=${GOLD}:fontsize=22:x=74:y=230[p10];"
 
-# Headlines with corrected alpha
 prev="p10"
 for i in "${!RAW_LINES[@]}"; do
     idx=$((i + 1))
     start=$((i * SLOT))
     end=$((start + SLOT))
     nxt="h${idx}"
-    ALPHA="if(between(mod(t\,${CYCLE})\,${start}\,${end}), \
-              if(lt(mod(t\,${CYCLE})-${start},0.6), (mod(t\,${CYCLE})-${start})/0.6, \
-              if(gt(mod(t\,${CYCLE})-${start},${SLOT}-0.6), (${end}-mod(t\,${CYCLE}))/0.6, 1)), \
-              0)"
-    CHAIN+="[${prev}]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/headline${idx}.txt:fontcolor=white:fontsize=32:line_spacing=14:x=60:y=320:alpha='${ALPHA}'[${nxt}];"
+    ALPHA="if(between(mod(t\,${CYCLE})\,${start}\,${end})\,if(lt(mod(t\,${CYCLE})-${start}\,0.6)\,(mod(t\,${CYCLE})-${start})/0.6\,if(gt(mod(t\,${CYCLE})-${start}\,${SLOT}-0.6)\,(${end}-mod(t\,${CYCLE}))/0.6\,1))\,0)"
+    CHAIN+="[${prev}]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/headline${idx}.txt:fontcolor=white:fontsize=30:line_spacing=14:x=50:y=300:alpha='1'[${nxt}];"
     prev="$nxt"
 done
 
@@ -104,7 +103,7 @@ for i in "${!RAW_LINES[@]}"; do
     prev="$nxt"
 done
 
-# active dot (gold)
+# active dot (gold, toggled on/off per slot)
 last=$((N - 1))
 for i in "${!RAW_LINES[@]}"; do
     idx=$((i + 1))
@@ -129,19 +128,43 @@ FILTER="$CHAIN"
 IFS=',' read -ra URLS <<< "$VIDEO_URL"
 while true; do
     for url in "${URLS[@]}"; do
-        echo "Streaming: $url"
-        ffmpeg -hide_banner -loglevel info -re \
-            -i "$url" \
-            -loop 1 -i overlay.png \
-            -filter_complex "$FILTER" \
-            -r 30 -s 1920x1080 \
-            -c:v libx264 -preset veryfast -profile:v high -level 4.2 \
-            -pix_fmt yuv420p -b:v 6000k -maxrate 6000k -bufsize 12000k \
-            -g 60 -keyint_min 60 -sc_threshold 0 \
-            -c:a aac -b:a 160k -ar 48000 -ac 2 \
-            -shortest -f flv \
-            "rtmp://a.rtmp.youtube.com/live2/${YOUTUBE_STREAM_KEY}"
-        echo "Video Finished. Loading next video in 5 seconds..."
+        echo "----------------------------------------"
+        echo "Streaming:"
+        echo "$url"
+        echo "----------------------------------------"
+
+        ffmpeg \
+        -hide_banner \
+        -loglevel info \
+        -re \
+        -i "$url" \
+        -loop 1 -i overlay.png \
+        -filter_complex "$FILTER" \
+        -r 30 \
+        -s 1920x1080 \
+        -c:v libx264 \
+        -preset ultrafast \
+        -profile:v high \
+        -level 4.2 \
+        -pix_fmt yuv420p \
+        -b:v 6000k \
+        -maxrate 6000k \
+        -bufsize 12000k \
+        -g 60 \
+        -keyint_min 60 \
+        -sc_threshold 0 \
+        -c:a aac \
+        -b:a 160k \
+        -ar 48000 \
+        -ac 2 \
+        -shortest \
+        -f flv \
+        "rtmp://a.rtmp.youtube.com/live2/${YOUTUBE_STREAM_KEY}"
+
+        echo ""
+        echo "Video Finished."
+        echo "Loading next video in 5 seconds..."
+        echo ""
         sleep 5
     done
 done
