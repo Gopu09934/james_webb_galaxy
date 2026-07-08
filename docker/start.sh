@@ -19,8 +19,7 @@ echo "Output Resolution : 1920x1080"
 echo "FPS               : 30"
 echo "========================================"
 
-# Use a known good font path inside Ubuntu
-FONT="/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+FONT="font.ttf"
 GOLD="0xE8A33D"
 ASSET_DIR="panel_assets"
 INFO_FILE="galaxy_info.txt"
@@ -37,6 +36,7 @@ printf "T O D A Y ' S   D I S C O V E R Y" > "$ASSET_DIR/header.txt"
 
 #############################################
 # Load headlines from galaxy_info.txt
+# (one headline per line, blank lines ignored)
 #############################################
 RAW_LINES=()
 if [ -f "$INFO_FILE" ]; then
@@ -83,15 +83,14 @@ CHAIN+="[p7]drawbox=x=50:y=210:w=420:h=2:color=white@0.35:t=fill[p8];"
 CHAIN+="[p8]drawbox=x=50:y=234:w=12:h=12:color=${GOLD}:t=fill[p9];"
 CHAIN+="[p9]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/header.txt:fontcolor=${GOLD}:fontsize=22:x=74:y=230[p10];"
 
-# Headlines
 prev="p10"
 for i in "${!RAW_LINES[@]}"; do
     idx=$((i + 1))
     start=$((i * SLOT))
     end=$((start + SLOT))
     nxt="h${idx}"
-    ENABLE="between(mod(t\,${CYCLE})\,${start}\,${end})"
-    CHAIN+="[${prev}]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/headline${idx}.txt:fontcolor=yellow:fontsize=40:line_spacing=14:x=60:y=320:enable='${ENABLE}'[${nxt}];"
+    ALPHA="ALPHA="if(between(mod(t\,${CYCLE})\,${start}\,${end})\,1\,0)"
+    CHAIN+="[${prev}]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/headline${idx}.txt:fontcolor=white:fontsize=30:line_spacing=14:x=50:y=300:alpha='${ALPHA}'[${nxt}];"
     prev="$nxt"
 done
 
@@ -104,7 +103,7 @@ for i in "${!RAW_LINES[@]}"; do
     prev="$nxt"
 done
 
-# active dot (gold)
+# active dot (gold, toggled on/off per slot)
 last=$((N - 1))
 for i in "${!RAW_LINES[@]}"; do
     idx=$((i + 1))
