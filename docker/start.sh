@@ -151,7 +151,7 @@ while true; do
   -i "$url" \
   -loop 1 -i overlay.png \
   -filter_complex "$FILTER" \
-  -r 60 \
+  -r 30 \
   -s 1280x720 \
   -c:v libx264 \
   -preset superfast \
