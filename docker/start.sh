@@ -23,7 +23,7 @@ FONT="font.ttf"
 GOLD="0xE8A33D"
 ASSET_DIR="panel_assets"
 INFO_FILE="galaxy_info.txt"
-SLOT=6   # seconds each headline is shown
+SLOT=11   # seconds each headline is shown
 
 mkdir -p "$ASSET_DIR"
 
@@ -155,7 +155,7 @@ while true; do
         -r 30 \
         -s 1920x1080 \
         -c:v libx264 \
-        -preset superfast \
+        -preset faster \
         -profile:v high \
         -level 4.2 \
         -pix_fmt yuv420p \
