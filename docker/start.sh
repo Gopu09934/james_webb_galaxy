@@ -19,7 +19,8 @@ echo "Output Resolution : 1920x1080"
 echo "FPS               : 30"
 echo "========================================"
 
-FONT="font.ttf"
+# Use a known good font path inside Ubuntu
+FONT="/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 GOLD="0xE8A33D"
 ASSET_DIR="panel_assets"
 INFO_FILE="galaxy_info.txt"
@@ -82,6 +83,7 @@ CHAIN+="[p7]drawbox=x=50:y=210:w=420:h=2:color=white@0.35:t=fill[p8];"
 CHAIN+="[p8]drawbox=x=50:y=234:w=12:h=12:color=${GOLD}:t=fill[p9];"
 CHAIN+="[p9]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/header.txt:fontcolor=${GOLD}:fontsize=22:x=74:y=230[p10];"
 
+# Headlines
 prev="p10"
 for i in "${!RAW_LINES[@]}"; do
     idx=$((i + 1))
@@ -89,7 +91,7 @@ for i in "${!RAW_LINES[@]}"; do
     end=$((start + SLOT))
     nxt="h${idx}"
     ENABLE="between(mod(t\,${CYCLE})\,${start}\,${end})"
-    CHAIN+="[${prev}]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/headline${idx}.txt:fontcolor=white:fontsize=30:line_spacing=14:x=50:y=300:enable='${ENABLE}'[${nxt}];"
+    CHAIN+="[${prev}]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/headline${idx}.txt:fontcolor=yellow:fontsize=40:line_spacing=14:x=60:y=320:enable='${ENABLE}'[${nxt}];"
     prev="$nxt"
 done
 
@@ -102,7 +104,7 @@ for i in "${!RAW_LINES[@]}"; do
     prev="$nxt"
 done
 
-# active dot (gold, toggled on/off per slot)
+# active dot (gold)
 last=$((N - 1))
 for i in "${!RAW_LINES[@]}"; do
     idx=$((i + 1))
@@ -140,7 +142,7 @@ while true; do
         -loop 1 -i overlay.png \
         -filter_complex "$FILTER" \
         -r 30 \
-        -s 1920x1080 \
+        -s 1280x720 \
         -c:v libx264 \
         -preset veryfast \
         -profile:v high \
