@@ -14,7 +14,6 @@ WORKDIR /app
 COPY start.sh .
 COPY overlay.png .
 COPY font.ttf .
-COPY galaxy_info.txt .
 
 RUN chmod +x start.sh
 
