@@ -36,7 +36,6 @@ printf "T O D A Y ' S   D I S C O V E R Y" > "$ASSET_DIR/header.txt"
 
 #############################################
 # Load headlines from galaxy_info.txt
-# (one headline per line, blank lines ignored)
 #############################################
 RAW_LINES=()
 if [ -f "$INFO_FILE" ]; then
@@ -89,8 +88,8 @@ for i in "${!RAW_LINES[@]}"; do
     start=$((i * SLOT))
     end=$((start + SLOT))
     nxt="h${idx}"
-    ALPHA="if(between(mod(t\,${CYCLE})\,${start}\,${end})\,if(lt(mod(t\,${CYCLE})-${start}\,0.6)\,(mod(t\,${CYCLE})-${start})/0.6\,if(gt(mod(t\,${CYCLE})-${start}\,${SLOT}-0.6)\,(${end}-mod(t\,${CYCLE}))/0.6\,1))\,0)"
-    CHAIN+="[${prev}]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/headline${idx}.txt:fontcolor=white:fontsize=30:line_spacing=14:x=50:y=300:alpha='${ALPHA}'[${nxt}];"
+    ENABLE="between(mod(t\,${CYCLE})\,${start}\,${end})"
+    CHAIN+="[${prev}]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/headline${idx}.txt:fontcolor=white:fontsize=30:line_spacing=14:x=50:y=300:enable='${ENABLE}'[${nxt}];"
     prev="$nxt"
 done
 
