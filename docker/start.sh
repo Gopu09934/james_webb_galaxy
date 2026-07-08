@@ -81,8 +81,8 @@ done
 #############################################
 # Build the filter_complex dynamically
 #############################################
-CHAIN="[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black[video];"
-CHAIN+="[1:v]scale=1920:1080:flags=lanczos[ovl];"
+CHAIN="[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:black[video];"
+CHAIN+="[1:v]scale=1280:720:flags=lanczos[ovl];"
 CHAIN+="[ovl][video]overlay=0:0[base];"
 CHAIN+="[base]drawbox=x=0:y=0:w=520:h=1080:color=black@0.55:t=fill[p1];"
 CHAIN+="[p1]drawbox=x=0:y=0:w=520:h=8:color=${GOLD}@0.9:t=fill[p2];"
@@ -148,24 +148,25 @@ while true; do
         ffmpeg \
   -hide_banner \
   -loglevel info \
+  -re \
   -i "$url" \
   -loop 1 -i overlay.png \
   -filter_complex "$FILTER" \
   -r 30 \
   -s 1280x720 \
   -c:v libx264 \
-  -preset superfast \
-  -profile:v high \
-  -level 4.2 \
+  -preset ultrafast \
+  -tune zerolatency \
+  -profile:v main \
   -pix_fmt yuv420p \
-  -b:v 4500k \
-  -maxrate 4500k \
-  -bufsize 9000k \
-  -g 120 \
-  -keyint_min 120 \
+  -b:v 3500k \
+  -maxrate 3500k \
+  -bufsize 7000k \
+  -g 60 \
+  -keyint_min 60 \
   -sc_threshold 0 \
   -c:a aac \
-  -b:a 160k \
+  -b:a 128k \
   -ar 48000 \
   -ac 2 \
   -shortest \
