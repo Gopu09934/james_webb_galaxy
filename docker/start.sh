@@ -111,7 +111,7 @@ for i in "${!RAW_LINES[@]}"; do
     idx=$((i + 1))
     x=$((50 + i * 26))
     nxt="db${idx}"
-    CHAIN+="[${prev}]drawbox=x=${x}:y=950:w=10:h=10:color=white@0.3:t=fill[${nxt}];"
+    CHAIN+="[${prev}]drawbox=x=${x}:y=680:w=10:h=10:color=white@0.3:t=fill[${nxt}];"
     prev="$nxt"
 done
 
