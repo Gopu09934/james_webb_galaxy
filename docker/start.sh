@@ -47,7 +47,7 @@ while true; do
         drawtext=fontfile=font.ttf:text='LIVE':\
         fontcolor=red:fontsize=60:x=40:y=25,\
         drawtext=fontfile=font.ttf:\
-        text='Credits\: NASA / SpaceX':\
+        text='Credits\: NASA':\
         fontcolor=white:fontsize=42:\
         x=w-text_w-30:y=20" \
         -r 30 \
