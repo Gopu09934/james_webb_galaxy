@@ -146,32 +146,32 @@ while true; do
         echo "----------------------------------------"
 
         ffmpeg \
-        -hide_banner \
-        -loglevel info \
-        -re \
-        -i "$url" \
-        -loop 1 -i overlay.png \
-        -filter_complex "$FILTER" \
-        -r 30 \
-        -s 1920x1080 \
-        -c:v libx264 \
-        -preset ultrafast \
-        -profile:v high \
-        -level 4.2 \
-        -pix_fmt yuv420p \
-        -b:v 6000k \
-        -maxrate 6000k \
-        -bufsize 12000k \
-        -g 60 \
-        -keyint_min 60 \
-        -sc_threshold 0 \
-        -c:a aac \
-        -b:a 160k \
-        -ar 48000 \
-        -ac 2 \
-        -shortest \
-        -f flv \
-        "rtmp://a.rtmp.youtube.com/live2/${YOUTUBE_STREAM_KEY}"
+  -hide_banner \
+  -loglevel info \
+  -i "$url" \
+  -loop 1 -i overlay.png \
+  -filter_complex "$FILTER" \
+  -r 60 \
+  -s 1280x720 \
+  -c:v libx264 \
+  -preset superfast \
+  -profile:v high \
+  -level 4.2 \
+  -pix_fmt yuv420p \
+  -b:v 4500k \
+  -maxrate 4500k \
+  -bufsize 9000k \
+  -g 120 \
+  -keyint_min 120 \
+  -sc_threshold 0 \
+  -c:a aac \
+  -b:a 160k \
+  -ar 48000 \
+  -ac 2 \
+  -shortest \
+  -f flv \
+  "rtmp://a.rtmp.youtube.com/live2/${YOUTUBE_STREAM_KEY}"
+
 
         echo ""
         echo "Video Finished."
