@@ -124,10 +124,10 @@ for i in "${!RAW_LINES[@]}"; do
     end=$((start + SLOT))
     ENABLE="between(mod(t\,${CYCLE})\,${start}\,${end})"
     if [ "$i" -eq "$last" ]; then
-        CHAIN+="[${prev}]drawbox=x=${x}:y=950:w=10:h=10:color=${GOLD}:t=fill:enable='${ENABLE}'"
+        CHAIN+="[${prev}]drawbox=x=${x}:y=680:w=10:h=10:color=${GOLD}:t=fill:enable='${ENABLE}'"
     else
         nxt="da${idx}"
-        CHAIN+="[${prev}]drawbox=x=${x}:y=950:w=10:h=10:color=${GOLD}:t=fill:enable='${ENABLE}'[${nxt}];"
+        CHAIN+="[${prev}]drawbox=x=${x}:y=680:w=10:h=10:color=${GOLD}:t=fill:enable='${ENABLE}'[${nxt}];"
         prev="$nxt"
     fi
 done
