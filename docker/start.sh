@@ -43,13 +43,13 @@ while true; do
         [0:v]scale=1920:1080:force_original_aspect_ratio=decrease,\
         pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black[video];\
         [1:v]scale=1920:1080:flags=lanczos[overlay];\
-        [video][overlay]overlay=0:0,\
+        [overlay][video]overlay=0:0,\
         drawtext=fontfile=font.ttf:text='LIVE':\
-        fontcolor=red:fontsize=34:x=40:y=35,\
+        fontcolor=red:fontsize=60:x=40:y=25,\
         drawtext=fontfile=font.ttf:\
-        text='Credits\: NASA':\
-        fontcolor=white:fontsize=24:\
-        x=w-text_w-30:y=25" \
+        text='Credits\: NASA / SpaceX':\
+        fontcolor=white:fontsize=42:\
+        x=w-text_w-30:y=20" \
         -r 30 \
         -s 1920x1080 \
         -c:v libx264 \
