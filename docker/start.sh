@@ -23,7 +23,7 @@ FONT="font.ttf"
 GOLD="0xE8A33D"
 ASSET_DIR="panel_assets"
 INFO_FILE="galaxy_info.txt"
-SLOT=6   # seconds each headline is shown
+SLOT=11  # seconds each headline is shown
 
 mkdir -p "$ASSET_DIR"
 
@@ -49,11 +49,17 @@ fi
 if [ "${#RAW_LINES[@]}" -eq 0 ]; then
     echo "WARNING: $INFO_FILE not found or empty — using default headlines."
     RAW_LINES=(
-        "Webb reveals one of the oldest galaxies ever discovered."
-        "Infrared observations uncover hidden star-forming regions."
-        "The Cartwheel Galaxy was formed after a galactic collision."
-        "Scientists continue studying the earliest galaxies in the Universe."
-    )
+    "James Webb captured some of the earliest galaxies, revealing how the Universe rapidly evolved after the Big Bang."
+    "Webb detected massive galaxies forming much earlier than expected, challenging existing theories about cosmic evolution and growth."
+    "Infrared observations uncovered hidden stellar nurseries where thousands of newborn stars remain invisible to optical telescopes today."
+    "Scientists discovered complex organic molecules within distant star-forming clouds, providing clues about planetary system formation processes everywhere."
+    "James Webb observed supermassive black holes existing surprisingly early, reshaping scientific understanding of galaxy evolution across cosmic history."
+    "Webb revealed extraordinary details inside the Pillars of Creation, exposing young stars hidden beneath thick interstellar dust clouds."
+    "Astronomers detected water vapor, carbon dioxide, and methane within distant exoplanet atmospheres using Webb's advanced infrared instruments successfully."
+    "The telescope continues studying ancient galaxies over thirteen billion years old, providing unprecedented insights into the early Universe."
+    "Webb captured breathtaking high-resolution images of spiral galaxies, revealing intricate dust structures and active star formation regions clearly."
+    "Scientists use James Webb daily to investigate galaxy mergers, stellar evolution, and potential environments capable of supporting future discoveries."
+)
 fi
 
 N=${#RAW_LINES[@]}
