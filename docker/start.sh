@@ -24,7 +24,6 @@ GOLD="0xE8A33D"
 ASSET_DIR="panel_assets"
 INFO_FILE="galaxy_info.txt"
 SLOT=6   # seconds each headline is shown
-SHOW_DOTS="${SHOW_DOTS:-0}"   # set to 1 to enable the bottom progress dots (extra CPU cost)
 
 mkdir -p "$ASSET_DIR"
 
@@ -68,60 +67,23 @@ for i in "${!RAW_LINES[@]}"; do
 done
 
 #############################################
-# Pre-render ALL static panel graphics ONCE
-# (LIVE badge, Credits, panel bg, accent bars,
-#  divider, title, header, dim background dots)
-# This runs a single time at startup instead of
-# being redrawn on every one of the ~30 frames
-# per second — this is the single biggest CPU
-# saving available on a weak 2-core runner.
-#############################################
-STATIC_PANEL="static_panel.png"
-
-STATIC_CHAIN="[0:v]scale=1920:1080:flags=lanczos[ovl];"
-STATIC_CHAIN+="[ovl]drawbox=x=0:y=0:w=520:h=1080:color=black@0.55:t=fill[s1];"
-STATIC_CHAIN+="[s1]drawbox=x=0:y=0:w=520:h=8:color=${GOLD}@0.9:t=fill[s2];"
-STATIC_CHAIN+="[s2]drawbox=x=514:y=0:w=4:h=1080:color=${GOLD}@0.7:t=fill[s3];"
-STATIC_CHAIN+="[s3]drawtext=fontfile=${FONT}:text='LIVE':fontcolor=red:fontsize=60:x=40:y=25[s4];"
-STATIC_CHAIN+="[s4]drawtext=fontfile=${FONT}:text='Credits\: NASA':fontcolor=white:fontsize=42:x=w-text_w-30:y=20[s5];"
-STATIC_CHAIN+="[s5]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/title1.txt:fontcolor=white:fontsize=34:x=50:y=115[s6];"
-STATIC_CHAIN+="[s6]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/title2.txt:fontcolor=white:fontsize=28:x=50:y=160[s7];"
-STATIC_CHAIN+="[s7]drawbox=x=50:y=210:w=420:h=2:color=white@0.35:t=fill[s8];"
-STATIC_CHAIN+="[s8]drawbox=x=50:y=234:w=12:h=12:color=${GOLD}:t=fill[s9];"
-STATIC_CHAIN+="[s9]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/header.txt:fontcolor=${GOLD}:fontsize=22:x=74:y=230[s10];"
-
-prevstatic="s10"
-if [ "$SHOW_DOTS" = "1" ]; then
-    lastdot=$((N - 1))
-    for i in "${!RAW_LINES[@]}"; do
-        idx=$((i + 1))
-        x=$((50 + i * 26))
-        if [ "$i" -eq "$lastdot" ]; then
-            STATIC_CHAIN+="[${prevstatic}]drawbox=x=${x}:y=950:w=10:h=10:color=white@0.3:t=fill"
-        else
-            nxt="sd${idx}"
-            STATIC_CHAIN+="[${prevstatic}]drawbox=x=${x}:y=950:w=10:h=10:color=white@0.3:t=fill[${nxt}];"
-            prevstatic="$nxt"
-        fi
-    done
-else
-    STATIC_CHAIN+="[${prevstatic}]null"
-fi
-
-echo "Pre-rendering static panel graphics (one-time)..."
-ffmpeg -y -loop 1 -i overlay.png -frames:v 1 -filter_complex "$STATIC_CHAIN" -pix_fmt rgba "$STATIC_PANEL"
-
-#############################################
-# Build the LIVE (per-frame) filter_complex
-# Only the video scale/pad, the pre-baked panel
-# overlay, the rotating headline text, and (if
-# enabled) the small active-dot indicator run
-# every frame now.
+# Build the filter_complex dynamically
 #############################################
 CHAIN="[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black[video];"
-CHAIN+="[1:v][video]overlay=0:0[base];"
+CHAIN+="[1:v]scale=1920:1080:flags=lanczos[ovl];"
+CHAIN+="[ovl][video]overlay=0:0[base];"
+CHAIN+="[base]drawbox=x=0:y=0:w=520:h=1080:color=black@0.55:t=fill[p1];"
+CHAIN+="[p1]drawbox=x=0:y=0:w=520:h=8:color=${GOLD}@0.9:t=fill[p2];"
+CHAIN+="[p2]drawbox=x=514:y=0:w=4:h=1080:color=${GOLD}@0.7:t=fill[p3];"
+CHAIN+="[p3]drawtext=fontfile=${FONT}:text='LIVE':fontcolor=red:fontsize=60:x=40:y=25[p4];"
+CHAIN+="[p4]drawtext=fontfile=${FONT}:text='Credits\: NASA':fontcolor=white:fontsize=42:x=w-text_w-30:y=20[p5];"
+CHAIN+="[p5]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/title1.txt:fontcolor=white:fontsize=34:x=50:y=115[p6];"
+CHAIN+="[p6]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/title2.txt:fontcolor=white:fontsize=28:x=50:y=160[p7];"
+CHAIN+="[p7]drawbox=x=50:y=210:w=420:h=2:color=white@0.35:t=fill[p8];"
+CHAIN+="[p8]drawbox=x=50:y=234:w=12:h=12:color=${GOLD}:t=fill[p9];"
+CHAIN+="[p9]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/header.txt:fontcolor=${GOLD}:fontsize=22:x=74:y=230[p10];"
 
-prev="base"
+prev="p10"
 for i in "${!RAW_LINES[@]}"; do
     idx=$((i + 1))
     start=$((i * SLOT))
@@ -132,36 +94,31 @@ for i in "${!RAW_LINES[@]}"; do
     prev="$nxt"
 done
 
-if [ "$SHOW_DOTS" = "1" ]; then
-    # background dots (dim)
-    for i in "${!RAW_LINES[@]}"; do
-        idx=$((i + 1))
-        x=$((50 + i * 26))
-        nxt="db${idx}"
-        CHAIN+="[${prev}]drawbox=x=${x}:y=950:w=10:h=10:color=white@0.3:t=fill[${nxt}];"
-        prev="$nxt"
-    done
+# background dots (dim)
+for i in "${!RAW_LINES[@]}"; do
+    idx=$((i + 1))
+    x=$((50 + i * 26))
+    nxt="db${idx}"
+    CHAIN+="[${prev}]drawbox=x=${x}:y=950:w=10:h=10:color=white@0.3:t=fill[${nxt}];"
+    prev="$nxt"
+done
 
-    # active dot (gold, toggled on/off per slot)
-    last=$((N - 1))
-    for i in "${!RAW_LINES[@]}"; do
-        idx=$((i + 1))
-        x=$((50 + i * 26))
-        start=$((i * SLOT))
-        end=$((start + SLOT))
-        ENABLE="between(mod(t\,${CYCLE})\,${start}\,${end})"
-        if [ "$i" -eq "$last" ]; then
-            CHAIN+="[${prev}]drawbox=x=${x}:y=950:w=10:h=10:color=${GOLD}:t=fill:enable='${ENABLE}'"
-        else
-            nxt="da${idx}"
-            CHAIN+="[${prev}]drawbox=x=${x}:y=950:w=10:h=10:color=${GOLD}:t=fill:enable='${ENABLE}'[${nxt}];"
-            prev="$nxt"
-        fi
-    done
-else
-    # dots disabled: pass the last headline's output straight through as final output
-    CHAIN+="[${prev}]null"
-fi
+# active dot (gold, toggled on/off per slot)
+last=$((N - 1))
+for i in "${!RAW_LINES[@]}"; do
+    idx=$((i + 1))
+    x=$((50 + i * 26))
+    start=$((i * SLOT))
+    end=$((start + SLOT))
+    ENABLE="between(mod(t\,${CYCLE})\,${start}\,${end})"
+    if [ "$i" -eq "$last" ]; then
+        CHAIN+="[${prev}]drawbox=x=${x}:y=950:w=10:h=10:color=${GOLD}:t=fill:enable='${ENABLE}'"
+    else
+        nxt="da${idx}"
+        CHAIN+="[${prev}]drawbox=x=${x}:y=950:w=10:h=10:color=${GOLD}:t=fill:enable='${ENABLE}'[${nxt}];"
+        prev="$nxt"
+    fi
+done
 
 FILTER="$CHAIN"
 
@@ -181,20 +138,18 @@ while true; do
         -loglevel info \
         -re \
         -i "$url" \
-        -loop 1 -i "$STATIC_PANEL" \
+        -loop 1 -i overlay.png \
         -filter_complex "$FILTER" \
         -r 30 \
         -s 1920x1080 \
         -c:v libx264 \
         -preset ultrafast \
-        -tune zerolatency \
-        -threads 2 \
         -profile:v high \
         -level 4.2 \
         -pix_fmt yuv420p \
-        -b:v 4500k \
-        -maxrate 4500k \
-        -bufsize 9000k \
+        -b:v 6000k \
+        -maxrate 3000k \
+        -bufsize 6000k \
         -g 60 \
         -keyint_min 60 \
         -sc_threshold 0 \
