@@ -97,7 +97,7 @@ CHAIN+="[p7]drawtext=fontfile=${FONT}:text='LIVE':fontcolor=white:fontsize=44:x=
 
 # --- credits + live UTC clock ----------------------------------------------
 CHAIN+="[p8]drawtext=fontfile=${FONT}:text='Credits\: NASA':fontcolor=white@0.85:fontsize=30:x=w-text_w-30:y=20[p9];"
-CHAIN+="[p9]drawtext=fontfile=${FONT}:text='%{gmtime\\:%H\\\\:%M\\\\:%S}  UTC':fontcolor=${GOLD}:fontsize=28:x=w-text_w-30:y=58[p10];"
+CHAIN+="[p9]drawtext=fontfile=${FONT}:text='%{gmtime\:%H\\\:%M\\\:%S} UTC':fontcolor=${GOLD}:fontsize=28:x=w-text_w-30:y=58[p10];"
 
 # --- titles ------------------------------------------------------------
 CHAIN+="[p10]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/title1.txt:fontcolor=white:fontsize=34:x=50:y=125[p11];"
