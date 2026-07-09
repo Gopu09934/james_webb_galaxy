@@ -97,8 +97,7 @@ CHAIN+="[p7]drawtext=fontfile=${FONT}:text='LIVE':fontcolor=white:fontsize=44:x=
 
 # --- credits + live UTC clock ----------------------------------------------
 CHAIN+="[p8]drawtext=fontfile=${FONT}:text='Credits\: NASA':fontcolor=white@0.85:fontsize=30:x=w-text_w-30:y=20[p9];"
-CHAIN+="[p9]drawtext=fontfile=${FONT}:text='%{gmtime:%H:%M:%S} UTC':fontcolor=${GOLD}:fontsize=28:x=w-text_w-30:y=58[p10];"
-
+CHAIN+="[p9]drawtext=fontfile=${FONT}:text='%{gmtime\\:%H\\\\:%M\\\\:%S}  UTC':fontcolor=${GOLD}:fontsize=28:x=w-text_w-30:y=58[p10];"
 
 # --- titles ------------------------------------------------------------
 CHAIN+="[p10]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/title1.txt:fontcolor=white:fontsize=34:x=50:y=125[p11];"
@@ -119,11 +118,9 @@ for i in "${!RAW_LINES[@]}"; do
     end=$((start + SLOT))
     nxt="h${idx}"
     ALPHA="if(between(mod(t\,${CYCLE})\,${start}\,${end})\,if(lt(mod(t\,${CYCLE})-${start}\,0.6)\,(mod(t\,${CYCLE})-${start})/0.6\,if(gt(mod(t\,${CYCLE})-${start}\,${SLOT}-0.6)\,(${end}-mod(t\,${CYCLE}))/0.6\,1))\,0)"
-    
     CHAIN+="[${prev}]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/headline${idx}.txt:fontcolor=white:fontsize=32:line_spacing=14:x=50:y=310:alpha='${ALPHA}'[${nxt}];"
     prev="$nxt"
 done
-
 
 # --- animated progress bar: fills across current headline's time slot -----
 CHAIN+="[${prev}]drawbox=x=50:y=470:w=420:h=3:color=white@0.15:t=fill[pg1];"
@@ -190,21 +187,22 @@ while true; do
         -map "[final]" \
         -map 0:a? \
         -r 30 \
--c:v libx264 \
--preset ultrafast \
--tune zerolatency \
--profile:v main \
--pix_fmt yuv420p \
--b:v 2500k \
--maxrate 2500k \
--bufsize 5000k \
--g 60 \
--keyint_min 60 \
--sc_threshold 0 \
--c:a aac \
--b:a 128k \
--ar 48000 \
--ac 2 \
+        -s 1920x1080 \
+        -c:v libx264 \
+        -preset veryfast \
+        -profile:v high \
+        -level 4.2 \
+        -pix_fmt yuv420p \
+        -b:v 6000k \
+        -maxrate 6000k \
+        -bufsize 12000k \
+        -g 60 \
+        -keyint_min 60 \
+        -sc_threshold 0 \
+        -c:a aac \
+        -b:a 160k \
+        -ar 48000 \
+        -ac 2 \
         -shortest \
         -f flv \
         "rtmp://a.rtmp.youtube.com/live2/${YOUTUBE_STREAM_KEY}"
