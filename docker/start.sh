@@ -194,8 +194,8 @@ while true; do
         -level 4.2 \
         -pix_fmt yuv420p \
         -b:v 6000k \
-        -maxrate 3000K \
-        -bufsize 6000K \
+        -maxrate 2500k \
+        -bufsize 4000k \
         -g 60 \
         -keyint_min 60 \
         -sc_threshold 0 \
