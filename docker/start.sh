@@ -193,7 +193,7 @@ while true; do
         -profile:v high \
         -level 4.2 \
         -pix_fmt yuv420p \
-        -b:v 6000k \
+        -b:v 2500k \
         -maxrate 2500k \
         -bufsize 4000k \
         -g 60 \
