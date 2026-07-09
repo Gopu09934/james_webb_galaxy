@@ -24,6 +24,7 @@ GOLD="0xE8A33D"
 ASSET_DIR="panel_assets"
 INFO_FILE="galaxy_info.txt"
 SLOT=6   # seconds each headline is shown
+SHOW_DOTS="${SHOW_DOTS:-0}"   # set to 1 to enable the bottom progress dots (extra CPU cost)
 
 mkdir -p "$ASSET_DIR"
 
@@ -94,31 +95,36 @@ for i in "${!RAW_LINES[@]}"; do
     prev="$nxt"
 done
 
-# background dots (dim)
-for i in "${!RAW_LINES[@]}"; do
-    idx=$((i + 1))
-    x=$((50 + i * 26))
-    nxt="db${idx}"
-    CHAIN+="[${prev}]drawbox=x=${x}:y=950:w=10:h=10:color=white@0.3:t=fill[${nxt}];"
-    prev="$nxt"
-done
-
-# active dot (gold, toggled on/off per slot)
-last=$((N - 1))
-for i in "${!RAW_LINES[@]}"; do
-    idx=$((i + 1))
-    x=$((50 + i * 26))
-    start=$((i * SLOT))
-    end=$((start + SLOT))
-    ENABLE="between(mod(t\,${CYCLE})\,${start}\,${end})"
-    if [ "$i" -eq "$last" ]; then
-        CHAIN+="[${prev}]drawbox=x=${x}:y=950:w=10:h=10:color=${GOLD}:t=fill:enable='${ENABLE}'"
-    else
-        nxt="da${idx}"
-        CHAIN+="[${prev}]drawbox=x=${x}:y=950:w=10:h=10:color=${GOLD}:t=fill:enable='${ENABLE}'[${nxt}];"
+if [ "$SHOW_DOTS" = "1" ]; then
+    # background dots (dim)
+    for i in "${!RAW_LINES[@]}"; do
+        idx=$((i + 1))
+        x=$((50 + i * 26))
+        nxt="db${idx}"
+        CHAIN+="[${prev}]drawbox=x=${x}:y=950:w=10:h=10:color=white@0.3:t=fill[${nxt}];"
         prev="$nxt"
-    fi
-done
+    done
+
+    # active dot (gold, toggled on/off per slot)
+    last=$((N - 1))
+    for i in "${!RAW_LINES[@]}"; do
+        idx=$((i + 1))
+        x=$((50 + i * 26))
+        start=$((i * SLOT))
+        end=$((start + SLOT))
+        ENABLE="between(mod(t\,${CYCLE})\,${start}\,${end})"
+        if [ "$i" -eq "$last" ]; then
+            CHAIN+="[${prev}]drawbox=x=${x}:y=950:w=10:h=10:color=${GOLD}:t=fill:enable='${ENABLE}'"
+        else
+            nxt="da${idx}"
+            CHAIN+="[${prev}]drawbox=x=${x}:y=950:w=10:h=10:color=${GOLD}:t=fill:enable='${ENABLE}'[${nxt}];"
+            prev="$nxt"
+        fi
+    done
+else
+    # dots disabled: pass the last headline's output straight through as final output
+    CHAIN+="[${prev}]null"
+fi
 
 FILTER="$CHAIN"
 
@@ -143,13 +149,15 @@ while true; do
         -r 30 \
         -s 1920x1080 \
         -c:v libx264 \
-        -preset superfast \
+        -preset ultrafast \
+        -tune zerolatency \
+        -threads 2 \
         -profile:v high \
         -level 4.2 \
         -pix_fmt yuv420p \
-        -b:v 6000k \
-        -maxrate 6000k \
-        -bufsize 12000k \
+        -b:v 4500k \
+        -maxrate 4500k \
+        -bufsize 9000k \
         -g 60 \
         -keyint_min 60 \
         -sc_threshold 0 \
