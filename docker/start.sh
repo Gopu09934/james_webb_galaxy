@@ -159,7 +159,7 @@ CHAIN+="[${prev}]drawbox=x=0:y=1020:w=1920:h=60:color=black@0.72:t=fill[tk1];"
 CHAIN+="[tk1]drawbox=x=0:y=1020:w=1920:h=3:color=${GOLD}@0.9:t=fill[tk2];"
 CHAIN+="[tk2]drawbox=x=0:y=1023:w=170:h=57:color=${GOLD}:t=fill[tk3];"
 CHAIN+="[tk3]drawtext=fontfile=${FONT}:text='BULLETIN':fontcolor=black:fontsize=24:x=25:y=1043[tk4];"
-CHAIN+="[tk4]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/ticker.txt:fontcolor=white:fontsize=26:y=1043:x='w-mod(t*${TICKER_SPEED}\,text_w+w)':eval=frame[tk5];"
+CHAIN+="[tk4]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/ticker.txt:fontcolor=white:fontsize=26:y=1043:x='w-mod(t*${TICKER_SPEED}\,text_w+w)'[tk5];"
 
 # --- outer frame border -------------------------------------------------
 CHAIN+="[tk5]drawbox=x=0:y=0:w=1920:h=1080:color=black@0.5:t=2[final]"
