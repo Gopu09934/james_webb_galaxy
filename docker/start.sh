@@ -189,7 +189,7 @@ while true; do
         -r 30 \
         -s 1920x1080 \
         -c:v libx264 \
-        -preset veryfast \
+        -preset ultrafast \
         -profile:v high \
         -level 4.2 \
         -pix_fmt yuv420p \
