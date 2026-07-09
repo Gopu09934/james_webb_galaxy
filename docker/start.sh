@@ -134,50 +134,75 @@ done
 
 FILTER="$CHAIN"
 
+
+#############################################
+# Download videos
+#############################################
+mkdir -p videos
+rm -f videos/*
+
+IFS=',' read -ra URLS <<< "$VIDEO_URL"
+
+count=1
+for url in "${URLS[@]}"; do
+    echo "Downloading Video $count..."
+
+    if curl -L --fail "$url" -o "videos/video_${count}.mp4"; then
+        echo "Download successful."
+        count=$((count + 1))
+    else
+        echo "Download failed: $url"
+    fi
+done
+
+if [ "$(find videos -name '*.mp4' | wc -l)" -eq 0 ]; then
+    echo "ERROR: No videos were downloaded."
+    exit 1
+fi
+
 #############################################
 # Stream loop
 #############################################
-IFS=',' read -ra URLS <<< "$VIDEO_URL"
 while true; do
-    for url in "${URLS[@]}"; do
+    for file in videos/*.mp4; do
+
         echo "----------------------------------------"
         echo "Streaming:"
-        echo "$url"
+        echo "$file"
         echo "----------------------------------------"
 
         ffmpeg \
-  -hide_banner \
-  -loglevel info \
-  -re \
-  -i "$url" \
-  -loop 1 -i overlay.png \
-  -filter_complex "$FILTER" \
-  -r 30 \
-  -s 1280x720 \
-  -c:v libx264 \
-  -preset ultrafast \
-  -tune zerolatency \
-  -profile:v main \
-  -pix_fmt yuv420p \
-  -b:v 3500k \
-  -maxrate 3500k \
-  -bufsize 7000k \
-  -g 60 \
-  -keyint_min 60 \
-  -sc_threshold 0 \
-  -c:a aac \
-  -b:a 128k \
-  -ar 48000 \
-  -ac 2 \
-  -shortest \
-  -f flv \
-  "rtmp://a.rtmp.youtube.com/live2/${YOUTUBE_STREAM_KEY}"
-
+        -hide_banner \
+        -loglevel info \
+        -re \
+        -i "$file" \
+        -loop 1 -i overlay.png \
+        -filter_complex "$FILTER" \
+        -r 30 \
+        -s 1280x720 \
+        -c:v libx264 \
+        -preset ultrafast \
+        -tune zerolatency \
+        -profile:v main \
+        -pix_fmt yuv420p \
+        -b:v 3500k \
+        -maxrate 3500k \
+        -bufsize 7000k \
+        -g 60 \
+        -keyint_min 60 \
+        -sc_threshold 0 \
+        -c:a aac \
+        -b:a 128k \
+        -ar 48000 \
+        -ac 2 \
+        -shortest \
+        -f flv \
+        "rtmp://a.rtmp.youtube.com/live2/${YOUTUBE_STREAM_KEY}"
 
         echo ""
         echo "Video Finished."
-        echo "Loading next video in 5 seconds..."
+        echo "Loading next video..."
         echo ""
-        sleep 5
+
     done
 done
