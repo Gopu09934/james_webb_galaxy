@@ -124,7 +124,7 @@ done
 
 # --- animated progress bar: fills across current headline's time slot -----
 CHAIN+="[${prev}]drawbox=x=50:y=470:w=420:h=3:color=white@0.15:t=fill[pg1];"
-CHAIN+="[pg1]drawbox=x=50:y=470:w='420*(mod(t\,${SLOT}))/${SLOT}':h=3:color=${GOLD}:t=fill:eval=frame[pg2];"
+CHAIN+="[pg1]drawbox=x=50:y=470:w='420*(mod(t\,${SLOT}))/${SLOT}':h=3:color=${GOLD}:t=fill[pg2];"
 prev="pg2"
 
 # --- background dots (dim) -------------------------------------------------
