@@ -189,13 +189,13 @@ while true; do
         -r 30 \
         -s 1920x1080 \
         -c:v libx264 \
-        -preset veryfast \
+        -preset ultrafast \
         -profile:v high \
         -level 4.2 \
         -pix_fmt yuv420p \
         -b:v 6000k \
-        -maxrate 6000k \
-        -bufsize 12000k \
+        -maxrate 3000K \
+        -bufsize 6000K \
         -g 60 \
         -keyint_min 60 \
         -sc_threshold 0 \
