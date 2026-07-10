@@ -27,6 +27,18 @@ INFO_FILE="galaxy_info.txt"
 SLOT=6            # seconds each headline is shown
 TICKER_SPEED=110  # pixels/second for the bottom ticker scroll
 
+#############################################
+# Up-next bumper (shown between videos)
+#############################################
+ENABLE_BUMPER=true
+BUMPER_DURATION=5   # seconds
+BUMPER_MESSAGES=(
+    "Stay tuned for more cosmic wonders"
+    "Another journey through deep space is coming up"
+    "More discoveries from the edge of the universe"
+    "The story of the cosmos continues"
+)
+
 mkdir -p "$ASSET_DIR"
 
 #############################################
@@ -237,11 +249,88 @@ CHAIN+="[tk6]drawbox=x=0:y=0:w=1920:h=1080:color=black@0.5:t=2[final]"
 FILTER="$CHAIN"
 
 #############################################
+# Up-next bumper: short branded title card
+# streamed between videos to reduce drop-off
+# at the loop/transition point.
+#############################################
+run_bumper() {
+    local next_url="$1"
+
+    # Try to derive a readable title from the filename; fall back to generic.
+    local raw title
+    raw="${next_url##*/}"
+    raw="${raw%.*}"
+    raw="${raw//[-_]/ }"
+    raw="$(echo "$raw" | tr -d '[:space:]')"
+    if [ -z "$raw" ] || [ ${#raw} -lt 3 ]; then
+        title="A New Discovery"
+    else
+        raw="${next_url##*/}"
+        raw="${raw%.*}"
+        raw="${raw//[-_]/ }"
+        title=$(echo "$raw" | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) substr($i,2); print}')
+    fi
+
+    local sub_idx=$((RANDOM % ${#BUMPER_MESSAGES[@]}))
+    printf '%s' "$title" | fold -s -w 34 > "$ASSET_DIR/bumper_title.txt"
+    printf '%s' "${BUMPER_MESSAGES[$sub_idx]}" > "$ASSET_DIR/bumper_sub.txt"
+
+    echo ">>> Up next: $title"
+
+    local fade_out_start
+    fade_out_start=$(awk -v d="$BUMPER_DURATION" 'BEGIN{print d - 0.6}')
+
+    local BFILTER
+    BFILTER="[0:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,eq=brightness=-0.08:saturation=0.85[bg];"
+    BFILTER+="[bg]drawbox=x=0:y=0:w=1920:h=1080:color=black@0.55:t=fill[b1];"
+    BFILTER+="[b1]drawbox=x=40:y=42:w=16:h=16:color=${RED}:t=fill:enable='lt(mod(t\,1)\,0.6)'[b2];"
+    BFILTER+="[b2]drawtext=fontfile=${FONT}:text='LIVE':fontcolor=white:fontsize=44:x=66:y=28[b3];"
+    BFILTER+="[b3]drawbox=x=0:y=470:w=1920:h=3:color=${GOLD}@0.8:t=fill[b4];"
+    BFILTER+="[b4]drawtext=fontfile=${FONT}:text='UP NEXT':fontcolor=${GOLD}:fontsize=32:x=(w-text_w)/2:y=390[b5];"
+    BFILTER+="[b5]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/bumper_title.txt:fontcolor=white:fontsize=54:line_spacing=10:x=(w-text_w)/2:y=520[b6];"
+    BFILTER+="[b6]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/bumper_sub.txt:fontcolor=white@0.75:fontsize=26:x=(w-text_w)/2:y=640[b7];"
+    BFILTER+="[b7]fade=t=in:st=0:d=0.5,fade=t=out:st=${fade_out_start}:d=0.6[final]"
+
+    ffmpeg \
+    -hide_banner \
+    -loglevel warning \
+    -loop 1 -t "$BUMPER_DURATION" -i overlay.png \
+    -f lavfi -t "$BUMPER_DURATION" -i anullsrc=r=48000:cc=2 \
+    -filter_complex "$BFILTER" \
+    -map "[final]" \
+    -map 1:a \
+    -r 30 \
+    -s 1920x1080 \
+    -c:v libx264 \
+    -preset veryfast \
+    -profile:v high \
+    -level 4.2 \
+    -pix_fmt yuv420p \
+    -b:v 6000k \
+    -maxrate 6000k \
+    -bufsize 12000k \
+    -g 60 \
+    -keyint_min 60 \
+    -sc_threshold 0 \
+    -c:a aac \
+    -b:a 160k \
+    -ar 48000 \
+    -ac 2 \
+    -f flv \
+    "rtmp://a.rtmp.youtube.com/live2/${YOUTUBE_STREAM_KEY}" || echo "WARNING: bumper failed, continuing to next video"
+}
+
+#############################################
 # Stream loop
 #############################################
 IFS=',' read -ra URLS <<< "$VIDEO_URL"
+NUM_URLS=${#URLS[@]}
 while true; do
-    for url in "${URLS[@]}"; do
+    for ((i = 0; i < NUM_URLS; i++)); do
+        url="${URLS[$i]}"
+        next_idx=$(( (i + 1) % NUM_URLS ))
+        next_url="${URLS[$next_idx]}"
+
         echo "----------------------------------------"
         echo "Streaming:"
         echo "$url"
@@ -279,6 +368,11 @@ while true; do
 
         echo ""
         echo "Video Finished."
+
+        if [ "$ENABLE_BUMPER" = true ]; then
+            run_bumper "$next_url"
+        fi
+
         echo "Loading next video in 5 seconds..."
         echo ""
         sleep 5
