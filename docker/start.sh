@@ -19,7 +19,7 @@ fi
 #   - BACKGROUND_AUDIO / BG_AUDIO_VOLUME control an optional music bed
 #   - Any combination works: video only, music only, both mixed, or muted
 #############################################
-ENABLE_SRC_AUDIO="${ENABLE_SRC_AUDIO:-true}"     # true/false — include the video's own audio at all
+ENABLE_SRC_AUDIO="${ENABLE_SRC_AUDIO:-false}"     # true/false — include the video's own audio at all
 SRC_AUDIO_VOLUME="${SRC_AUDIO_VOLUME:-1.0}"      # relative volume of the video's own audio
 
 BACKGROUND_AUDIO="${BACKGROUND_AUDIO:-}"
