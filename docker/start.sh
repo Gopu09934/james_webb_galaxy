@@ -171,12 +171,13 @@ done
 # --- bottom ticker bar -------------------------------------------------
 CHAIN+="[${prev}]drawbox=x=0:y=1020:w=1920:h=60:color=black@0.72:t=fill[tk1];"
 CHAIN+="[tk1]drawbox=x=0:y=1020:w=1920:h=3:color=${GOLD}@0.9:t=fill[tk2];"
-CHAIN+="[tk2]drawbox=x=0:y=1023:w=170:h=57:color=${GOLD}:t=fill[tk3];"
-CHAIN+="[tk3]drawtext=fontfile=${FONT}:text='BULLETIN':fontcolor=black:fontsize=24:x=25:y=1043[tk4];"
-CHAIN+="[tk4]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/ticker.txt:fontcolor=white:fontsize=26:y=1043:x='w-mod(t*${TICKER_SPEED}\,text_w+w)'[tk5];"
+CHAIN+="[tk2]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/ticker.txt:fontcolor=white:fontsize=26:borderw=2:bordercolor=black@0.6:y=1043:x='w-mod(t*${TICKER_SPEED}\,text_w+w)'[tk3];"
+CHAIN+="[tk3]drawbox=x=0:y=1020:w=180:h=60:color=black@0.85:t=fill[tk4];"
+CHAIN+="[tk4]drawbox=x=0:y=1023:w=170:h=57:color=${GOLD}:t=fill[tk5];"
+CHAIN+="[tk5]drawtext=fontfile=${FONT}:text='BULLETIN':fontcolor=black:fontsize=24:x=25:y=1043[tk6];"
 
 # --- outer frame border -------------------------------------------------
-CHAIN+="[tk5]drawbox=x=0:y=0:w=1920:h=1080:color=black@0.5:t=2[final]"
+CHAIN+="[tk6]drawbox=x=0:y=0:w=1920:h=1080:color=black@0.5:t=2[final]"
 
 FILTER="$CHAIN"
 
@@ -203,7 +204,7 @@ while true; do
         -r 30 \
         -s 1920x1080 \
         -c:v libx264 \
-        -preset ultrafast \
+        -preset veryfast \
         -profile:v high \
         -level 4.2 \
         -pix_fmt yuv420p \
