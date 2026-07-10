@@ -39,6 +39,12 @@ BUMPER_MESSAGES=(
     "The story of the cosmos continues"
 )
 
+#############################################
+# Auto-restart on failure
+#############################################
+MAX_RETRIES=5       # per-video retry attempts before moving on
+RETRY_DELAY=5        # seconds between retries
+
 mkdir -p "$ASSET_DIR"
 
 #############################################
@@ -322,21 +328,21 @@ run_bumper() {
 }
 
 #############################################
-# Stream loop
+# Stream one video with automatic retry on
+# failure/crash (e.g. Bus error, network drop),
+# instead of letting set -e kill the script.
 #############################################
-IFS=',' read -ra URLS <<< "$VIDEO_URL"
-NUM_URLS=${#URLS[@]}
-while true; do
-    for ((i = 0; i < NUM_URLS; i++)); do
-        url="${URLS[$i]}"
-        next_idx=$(( (i + 1) % NUM_URLS ))
-        next_url="${URLS[$next_idx]}"
+run_video() {
+    local url="$1"
+    local attempt=1
 
+    while [ "$attempt" -le "$MAX_RETRIES" ]; do
         echo "----------------------------------------"
-        echo "Streaming:"
+        echo "Streaming (attempt ${attempt}/${MAX_RETRIES}):"
         echo "$url"
         echo "----------------------------------------"
 
+        set +e
         ffmpeg \
         -hide_banner \
         -loglevel info \
@@ -349,7 +355,7 @@ while true; do
         -r 30 \
         -s 1920x1080 \
         -c:v libx264 \
-        -preset veryfast \
+        -preset ultrafast \
         -profile:v high \
         -level 4.2 \
         -pix_fmt yuv420p \
@@ -366,9 +372,38 @@ while true; do
         -shortest \
         -f flv \
         "rtmp://a.rtmp.youtube.com/live2/${YOUTUBE_STREAM_KEY}"
+        local exit_code=$?
+        set -e
 
-        echo ""
-        echo "Video Finished."
+        if [ "$exit_code" -eq 0 ]; then
+            echo "Video finished normally."
+            return 0
+        fi
+
+        echo "WARNING: ffmpeg exited with code ${exit_code} (attempt ${attempt}/${MAX_RETRIES})."
+        attempt=$((attempt + 1))
+        if [ "$attempt" -le "$MAX_RETRIES" ]; then
+            echo "Retrying in ${RETRY_DELAY}s..."
+            sleep "$RETRY_DELAY"
+        else
+            echo "ERROR: Max retries reached for this video. Moving on."
+        fi
+    done
+    return 1
+}
+
+#############################################
+# Stream loop
+#############################################
+IFS=',' read -ra URLS <<< "$VIDEO_URL"
+NUM_URLS=${#URLS[@]}
+while true; do
+    for ((i = 0; i < NUM_URLS; i++)); do
+        url="${URLS[$i]}"
+        next_idx=$(( (i + 1) % NUM_URLS ))
+        next_url="${URLS[$next_idx]}"
+
+        run_video "$url"
 
         if [ "$ENABLE_BUMPER" = true ]; then
             run_bumper "$next_url"
