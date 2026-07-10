@@ -71,6 +71,33 @@ if [ "${#RAW_LINES[@]}" -eq 0 ]; then
     )
 fi
 
+#############################################
+# Fun facts (fills empty space + adds motion)
+# Optional file: facts.txt, one fact per line.
+#############################################
+FACT_SLOT=8   # seconds each fact is shown
+FACTS=()
+if [ -f "facts.txt" ]; then
+    while IFS= read -r line; do
+        [ -n "$(echo "$line" | tr -d '[:space:]')" ] && FACTS+=("$line")
+    done < "facts.txt"
+fi
+if [ "${#FACTS[@]}" -eq 0 ]; then
+    FACTS=(
+        "Light from the Cartwheel Galaxy took 500 million years to reach us."
+        "Webb sees infrared light invisible to the human eye."
+        "A day on Venus is longer than its year."
+        "There are more stars in the universe than grains of sand on Earth."
+    )
+fi
+FACT_N=${#FACTS[@]}
+FACT_CYCLE=$((FACT_N * FACT_SLOT))
+for i in "${!FACTS[@]}"; do
+    idx=$((i + 1))
+    echo "${FACTS[$i]}" | fold -s -w 34 > "$ASSET_DIR/fact${idx}.txt"
+done
+printf 'DID YOU KNOW' > "$ASSET_DIR/fact_label.txt"
+
 N=${#RAW_LINES[@]}
 CYCLE=$((N * SLOT))
 echo "Loaded $N headline(s) from $INFO_FILE — rotation cycle: ${CYCLE}s"
@@ -93,7 +120,7 @@ printf '%s' "$TICKER_STRING" > "$ASSET_DIR/ticker.txt"
 #############################################
 
 # --- base video + vignette + background art -------------------------------
-CHAIN="[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black,vignette=PI/5[video];"
+CHAIN="[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black,vignette=PI/5,eq=contrast=1.08:saturation=1.15:brightness=0.02[video];"
 CHAIN+="[1:v]scale=1920:1080:flags=lanczos[ovl];"
 CHAIN+="[ovl][video]overlay=0:0[base];"
 
@@ -168,6 +195,34 @@ for i in "${!RAW_LINES[@]}"; do
     fi
 done
 
+# --- rotating fun fact (fills empty space, adds periodic motion) ----------
+CHAIN+="[${prev}]drawbox=x=50:y=560:w=420:h=2:color=${GOLD}@0.4:t=fill[fp1];"
+CHAIN+="[fp1]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/fact_label.txt:fontcolor=${GOLD}@0.85:fontsize=17:x=50:y=580[fp2];"
+prev="fp2"
+for i in "${!FACTS[@]}"; do
+    idx=$((i + 1))
+    start=$((i * FACT_SLOT))
+    end=$((start + FACT_SLOT))
+    nxt="f${idx}"
+    FALPHA="if(between(mod(t\,${FACT_CYCLE})\,${start}\,${end})\,if(lt(mod(t\,${FACT_CYCLE})-${start}\,0.6)\,(mod(t\,${FACT_CYCLE})-${start})/0.6\,if(gt(mod(t\,${FACT_CYCLE})-${start}\,${FACT_SLOT}-0.6)\,(${end}-mod(t\,${FACT_CYCLE}))/0.6\,1))\,0)"
+    CHAIN+="[${prev}]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/fact${idx}.txt:fontcolor=white@0.9:fontsize=24:line_spacing=10:x=50:y=610:alpha='${FALPHA}'[${nxt}];"
+    prev="$nxt"
+done
+
+# --- periodic subscribe CTA (fades in every 4 min for 8s) -----------------
+CTA_CYCLE=240   # total cycle length in seconds
+CTA_SHOW=8      # how long the CTA stays visible per cycle
+CTA_START=0
+CTA_END=$CTA_SHOW
+CTA_ALPHA="if(between(mod(t\,${CTA_CYCLE})\,${CTA_START}\,${CTA_END})\,if(lt(mod(t\,${CTA_CYCLE})-${CTA_START}\,0.6)\,(mod(t\,${CTA_CYCLE})-${CTA_START})/0.6\,if(gt(mod(t\,${CTA_CYCLE})-${CTA_START}\,${CTA_SHOW}-0.6)\,(${CTA_END}-mod(t\,${CTA_CYCLE}))/0.6\,1))\,0)"
+CTA_ENABLE="between(mod(t\,${CTA_CYCLE})\,${CTA_START}\,${CTA_END})"
+printf 'SUBSCRIBE for daily space discoveries' > "$ASSET_DIR/cta.txt"
+CHAIN+="[${prev}]drawbox=x=1100:y=930:w=760:h=64:color=black@0.75:t=fill:enable='${CTA_ENABLE}'[cta1];"
+CHAIN+="[cta1]drawbox=x=1100:y=930:w=6:h=64:color=${GOLD}:t=fill:enable='${CTA_ENABLE}'[cta2];"
+CHAIN+="[cta2]drawbox=x=1132:y=954:w=16:h=16:color=${RED}:t=fill:enable='${CTA_ENABLE}'[cta3];"
+CHAIN+="[cta3]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/cta.txt:fontcolor=white:fontsize=28:x=1160:y=950:alpha='${CTA_ALPHA}'[cta4];"
+prev="cta4"
+
 # --- bottom ticker bar -------------------------------------------------
 CHAIN+="[${prev}]drawbox=x=0:y=1020:w=1920:h=60:color=black@0.72:t=fill[tk1];"
 CHAIN+="[tk1]drawbox=x=0:y=1020:w=1920:h=3:color=${GOLD}@0.9:t=fill[tk2];"
@@ -204,7 +259,7 @@ while true; do
         -r 30 \
         -s 1920x1080 \
         -c:v libx264 \
-        -preset veryfast \
+        -preset ultrafast \
         -profile:v high \
         -level 4.2 \
         -pix_fmt yuv420p \
