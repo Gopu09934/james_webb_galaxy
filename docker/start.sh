@@ -369,7 +369,7 @@ run_video() {
     vol_is_default=$(awk -v v="$SRC_AUDIO_VOLUME" 'BEGIN{print (v==1)?"true":"false"}')
 
     local src_present="false"
-    if [ "$ENABLE_SRC_AUDIO" = "false" ]; then
+    if [ "$ENABLE_SRC_AUDIO" = "true" ]; then
         if [ -n "$BACKGROUND_AUDIO" ] || [ "$vol_is_default" = "false" ]; then
             local has_src_audio="false"
             if command -v ffprobe >/dev/null 2>&1; then
