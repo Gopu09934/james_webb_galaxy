@@ -165,8 +165,12 @@ CHAIN+="[p6]drawbox=x=27:y=28:w=11:h=11:color=${RED}:t=fill:enable='lt(mod(t\,1)
 CHAIN+="[p7]drawtext=fontfile=${FONT}:text='LIVE':fontcolor=white:fontsize=30:x=44:y=19[p8];"
 
 # --- credits + live UTC clock ----------------------------------------------
-CHAIN+="[p8]drawtext=fontfile=${FONT}:text='Credits\: NASA':fontcolor=white@0.85:fontsize=20:x=w-text_w-20:y=14[p9];"
-CHAIN+="[p9]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/clock.txt:reload=1:fontcolor=${GOLD}:fontsize=19:x=w-text_w-20:y=39[p10];"
+# NOTE: was x=w-text_w-20, which right-aligns to the full 1280px frame —
+# that put this text floating over the video, outside the 333px panel.
+# Right-align to the panel's own right edge (313) instead, so it sits
+# under/beside the LIVE badge, inside the panel.
+CHAIN+="[p8]drawtext=fontfile=${FONT}:text='Credits\: NASA':fontcolor=white@0.85:fontsize=15:x=313-text_w:y=19[p9];"
+CHAIN+="[p9]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/clock.txt:reload=1:fontcolor=${GOLD}:fontsize=14:x=313-text_w:y=39[p10];"
 
 # --- titles ------------------------------------------------------------
 CHAIN+="[p10]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/title1.txt:fontcolor=white:fontsize=23:x=33:y=83[p11];"
