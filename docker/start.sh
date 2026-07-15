@@ -327,7 +327,7 @@ run_bumper() {
     -filter_complex "$BFILTER" \
     -map "[final]" \
     -map 1:a \
-    -r 30 \
+    -r 24 \
     -s 1280x720 \
     -c:v libx264 \
     -preset ultrafast \
