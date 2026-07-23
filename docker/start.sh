@@ -255,14 +255,14 @@ CHAIN+="[ovl][video]overlay=0:0[base0];"
 # a cheap but convincing twinkle, no per-frame procedural cost.
 
 if [ "$STAR_LAYERS_ENABLED" = true ]; then
-    CHAIN+="[2:v]scale=1280:720,format=rgba[star_a];"
-    CHAIN+="[3:v]scale=1280:720,format=rgba[star_b];"
-
-    CHAIN+="[base0][star_a]overlay=0:0:alpha='0.25+0.45*abs(sin(t*0.7))'[base1];"
-    CHAIN+="[base1][star_b]overlay=0:0:alpha='0.20+0.40*abs(sin(t*0.9+1.57))'[base];"
+    CHAIN+="[2:v]scale=1280:720,format=rgba,lut=a='255*(0.25+0.65*abs(sin(0.7*T)))'[star_a];"
+    CHAIN+="[3:v]scale=1280:720,format=rgba,lut=a='255*(0.20+0.60*abs(sin(0.9*T+1.57)))'[star_b];"
+    CHAIN+="[base0][star_a]overlay=0:0[base1];"
+    CHAIN+="[base1][star_b]overlay=0:0[base];"
 else
     CHAIN+="[base0]null[base];"
 fi
+
 
     
 
