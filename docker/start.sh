@@ -249,15 +249,14 @@ CHAIN="[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow
 CHAIN+="[1:v]scale=1280:720:flags=fast_bilinear[ovl];"
 CHAIN+="[ovl][video]overlay=0:0[base0];"
 
-# --- twinkling star overlay ---------------------------------------
-# Two star PNGs (inputs 2 and 3), phase-offset sine alpha pulsing so
-# roughly half the stars are brightening while the other half dims —
-# a cheap but convincing twinkle, no per-frame procedural cost.
+# --- star overlay at fixed opacity --------------------------------
+# Two star PNGs (inputs 2 and 3) overlaid at moderate opacity.
+# Simple, clean, no per-frame expression issues.
 if [ "$STAR_LAYERS_ENABLED" = true ]; then
-    CHAIN+="[2:v]scale=1280:720,format=rgba,colorchannelmixer=aa='0.25+0.65*abs(sin(t*0.7))'[star_a];"
-    CHAIN+="[3:v]scale=1280:720,format=rgba,colorchannelmixer=aa='0.20+0.60*abs(sin(t*0.9+1.57))'[star_b];"
-    CHAIN+="[base0][star_a]overlay=0:0[base1];"
-    CHAIN+="[base1][star_b]overlay=0:0[base];"
+    CHAIN+="[2:v]scale=1280:720[star_a];"
+    CHAIN+="[3:v]scale=1280:720[star_b];"
+    CHAIN+="[base0][star_a]overlay=0:0:alpha=0.35[base1];"
+    CHAIN+="[base1][star_b]overlay=0:0:alpha=0.25[base];"
 else
     CHAIN+="[base0]null[base];"
 fi
@@ -373,8 +372,15 @@ CHAIN+="[tk3]drawbox=x=0:y=680:w=120:h=40:color=black@0.85:t=fill[tk4];"
 CHAIN+="[tk4]drawbox=x=0:y=682:w=113:h=38:color=${GOLD}:t=fill[tk5];"
 CHAIN+="[tk5]drawtext=fontfile=${FONT}:text='BULLETIN':fontcolor=black:fontsize=16:x=17:y=695[tk6];"
 
-# --- outer frame border -------------------------------------------------
-CHAIN+="[tk6]drawbox=x=0:y=0:w=1280:h=720:color=black@0.5:t=2[final]"
+# --- on-screen content label badge (center-bottom) ----------------------
+# Large badge that displays current content type (NEBULA, GALAXY, etc.)
+# with gold glow box and fade animation. Reads from badge.txt which
+# is updated by the tag watcher.
+printf 'DEEP SPACE' > "$ASSET_DIR/badge.txt"
+
+CHAIN+="[tk6]drawbox=x=300:y=540:w=680:h=140:color=black@0.70:t=fill[badge_bg];"
+CHAIN+="[badge_bg]drawbox=x=305:y=545:w=670:h=130:color=${GOLD}@0.20:t=1[badge_border];"
+CHAIN+="[badge_border]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/badge.txt:reload=1:fontcolor=${GOLD}:fontsize=52:fontweight=bold:x=(w-text_w)/2:y=565[final]"
 
 FILTER="$CHAIN"
 
@@ -452,19 +458,70 @@ run_bumper() {
 }
 
 #############################################
+# Tag watcher: swap eyebrow label as video
+# plays through its timeline (e.g. "0:Nebula|45:Galaxy|120:Star Cluster")
+#############################################
+start_tag_watcher() {
+    local timeline="$1"
+    local start_ts
+    start_ts=$(date +%s)
+    local last_label=""
+
+    # Parse timeline like "0:Nebula|45:Galaxy|120:Star Cluster"
+    IFS='|' read -ra ENTRIES <<< "$timeline"
+
+    while true; do
+        local elapsed=$(( $(date +%s) - start_ts ))
+        local label=""
+        
+        # Find the most recent threshold we've crossed
+        for entry in "${ENTRIES[@]}"; do
+            local sec="${entry%%:*}"
+            local lbl="${entry#*:}"
+            if [[ "$sec" =~ ^[0-9]+$ ]] && [ "$elapsed" -ge "$sec" ]; then
+                label="$lbl"
+            fi
+        done
+        [ -z "$label" ] && label="Deep Space"
+
+        # Only rewrite if label changed (reduce file I/O)
+        if [ "$label" != "$last_label" ]; then
+            local upper_label=$(echo "$label" | tr '[:lower:]' '[:upper:]')
+            
+            # Left panel eyebrow tag
+            printf '%s REPORT' "$upper_label" > "$ASSET_DIR/eyebrow.txt"
+            
+            # On-screen center badge (just the label, no "REPORT")
+            printf '%s' "$upper_label" > "$ASSET_DIR/badge.txt"
+            
+            echo "  [TAG SWITCH] $label (elapsed: ${elapsed}s)"
+            last_label="$label"
+        fi
+        sleep 1
+    done
+}
+
+#############################################
 # Stream one video with automatic retry on
 # failure/crash (e.g. Bus error, network drop),
 # instead of letting set -e kill the script.
 #############################################
 run_video() {
     local url="$1"
+    local timeline="$2"
     local attempt=1
 
     while [ "$attempt" -le "$MAX_RETRIES" ]; do
         echo "----------------------------------------"
         echo "Streaming (attempt ${attempt}/${MAX_RETRIES}):"
         echo "$url"
+        [ -n "$timeline" ] && echo "Timeline: $timeline"
         echo "----------------------------------------"
+
+        # Start the tag watcher in background
+        start_tag_watcher "$timeline" &
+        local TAG_PID=$!
+        trap "kill $TAG_PID 2>/dev/null || true" RETURN
 
         set +e
         ffmpeg \
@@ -521,45 +578,57 @@ run_video() {
 }
 
 #############################################
-# Stream loop
+# Stream loop with timeline support
 #############################################
-# VIDEO_URL entries may optionally carry a category tag after "::",
-# e.g. VIDEO_URL="https://.../clip1.mp4::Nebula,https://.../clip2.mp4::Galaxy"
-# If no tag is given, it falls back to "Deep Space".
-# This is a manual tag, not live image detection — see note below the
-# script for why real-time scene detection isn't practical here.
+# VIDEO_URL format:
+#   Simple:     https://example.com/video.mp4
+#   Timeline:   https://example.com/video.mp4::0:Nebula|45:Galaxy|120:Star
+#
+# Timeline format: "SEC1:LABEL1|SEC2:LABEL2|..."
+#   At 0s: panel shows "NEBULA REPORT"
+#   At 45s: panel switches to "GALAXY REPORT"
+#   At 120s: panel switches to "STAR REPORT"
+#
+# This is still manual — you write the timeline; not live detection.
 IFS=',' read -ra RAW_URLS <<< "$VIDEO_URL"
 URLS=()
-TAGS=()
+TIMELINES=()
 for u in "${RAW_URLS[@]}"; do
     u="${u#"${u%%[![:space:]]*}"}"
     u="${u%"${u##*[![:space:]]}"}"
     [ -z "$u" ] && continue
+    
+    timeline=""
     if [[ "$u" == *"::"* ]]; then
-        tag="${u##*::}"
+        timeline="${u##*::}"
         u="${u%%::*}"
-    else
-        tag="Deep Space"
     fi
+    [ -z "$timeline" ] && timeline="0:Deep Space"
+    
     URLS+=("$u")
-    TAGS+=("$tag")
+    TIMELINES+=("$timeline")
 done
 NUM_URLS=${#URLS[@]}
 if [ "$NUM_URLS" -eq 0 ]; then
     echo "ERROR: VIDEO_URL contained no valid entries after parsing"
     exit 1
 fi
+
+echo "Parsed $NUM_URLS video(s):"
+for ((i = 0; i < NUM_URLS; i++)); do
+    echo "  [$((i+1))] ${URLS[$i]}"
+    echo "       Timeline: ${TIMELINES[$i]}"
+done
+echo ""
+
 while true; do
     for ((i = 0; i < NUM_URLS; i++)); do
         url="${URLS[$i]}"
-        tag="${TAGS[$i]}"
+        timeline="${TIMELINES[$i]}"
         next_idx=$(( (i + 1) % NUM_URLS ))
         next_url="${URLS[$next_idx]}"
 
-        # Set the panel's category label for this video before it streams.
-        printf '%s REPORT' "$(echo "$tag" | tr '[:lower:]' '[:upper:]')" > "$ASSET_DIR/eyebrow.txt"
-
-        run_video "$url"
+        run_video "$url" "$timeline"
 
         if [ "$ENABLE_BUMPER" = true ]; then
             run_bumper "$next_url"
