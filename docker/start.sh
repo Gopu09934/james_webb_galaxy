@@ -69,7 +69,49 @@ trap 'kill "$CLOCK_PID" 2>/dev/null || true' EXIT
 printf 'J A M E S   W E B B'              > "$ASSET_DIR/title1.txt"
 printf 'S P A C E   T E L E S C O P E'    > "$ASSET_DIR/title2.txt"
 printf "T O D A Y ' S   D I S C O V E R Y" > "$ASSET_DIR/header.txt"
-printf 'DEEP SPACE REPORT'                > "$ASSET_DIR/eyebrow.txt"
+
+# NOTE: eyebrow.txt is no longer written once here — it's now written
+# fresh before every video (see stream loop at the bottom), so the tag
+# ("GALAXY REPORT" / "NEBULA REPORT" / etc.) matches whatever is
+# actually playing. This default is only a fallback in case something
+# streams before the loop sets it.
+printf 'DEEP SPACE REPORT' > "$ASSET_DIR/eyebrow.txt"
+
+#############################################
+# Generate a twinkling starfield (two layers,
+# offset in phase) as static PNGs once at
+# startup. Cheaper than any per-frame
+# procedural noise filter, and looks like a
+# real fixed star field rather than TV static.
+#############################################
+STAR_LAYERS_ENABLED=true
+python3 - "$ASSET_DIR" <<'PYEOF'
+import random, sys
+from PIL import Image, ImageDraw
+
+out_dir = sys.argv[1]
+W, H = 1280, 720
+random.seed(7)
+
+def make_layer(path, count):
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    for _ in range(count):
+        x = random.randint(0, W - 1)
+        y = random.randint(0, H - 1)
+        r = random.choice([1, 1, 1, 2])          # mostly tiny points, some bigger
+        base_a = random.randint(120, 255)
+        color = (255, 255, 255, base_a)
+        if r == 1:
+            d.point((x, y), fill=color)
+        else:
+            d.ellipse([x - r, y - r, x + r, y + r], fill=color)
+    img.save(path)
+
+make_layer(f"{out_dir}/stars_a.png", 140)
+make_layer(f"{out_dir}/stars_b.png", 110)
+PYEOF
+echo "Generated twinkling star layers: $ASSET_DIR/stars_a.png, $ASSET_DIR/stars_b.png"
 
 #############################################
 # Load headlines from galaxy_info.txt
@@ -85,11 +127,19 @@ fi
 if [ "${#RAW_LINES[@]}" -eq 0 ]; then
     echo "WARNING: $INFO_FILE not found or empty — using default headlines."
     RAW_LINES=(
-        "Webb reveals one of the oldest galaxies ever discovered."
-        "Infrared observations uncover hidden star-forming regions."
-        "The Cartwheel Galaxy was formed after a galactic collision."
-        "Scientists continue studying the earliest galaxies in the Universe."
-    )
+    "The James Webb Space Telescope continues revealing distant galaxies from the early Universe."
+    "Webb observations are helping scientists understand how the first stars and galaxies formed."
+    "Astronomers have discovered massive black holes growing in some of the Universe's earliest galaxies."
+    "New infrared data is uncovering hidden star formation behind cosmic dust clouds."
+    "Scientists are using Webb to study exoplanet atmospheres and search for signs of chemical diversity."
+    "New observations are changing our understanding of galaxy evolution across billions of years."
+    "Space missions are collecting valuable data about dark matter, cosmic expansion, and the structure of the Universe."
+    "Astronomers are discovering new exoplanets that reveal the incredible diversity of planetary systems."
+    "The study of gravitational waves is opening a new way to observe powerful cosmic events."
+    "Scientists are mapping distant galaxies to understand how the Universe expanded over time."
+    "Future space telescopes will explore the origins of stars, planets, and galaxies in greater detail."
+    "Researchers are using advanced simulations to recreate the formation of cosmic structures."
+)
 fi
 
 N=${#RAW_LINES[@]}
@@ -97,14 +147,31 @@ CYCLE=$((N * SLOT))
 echo "Loaded $N headline(s) from $INFO_FILE — rotation cycle: ${CYCLE}s"
 
 # Wrap each headline for the side panel.
-# NOTE: widened from 20 -> 25 chars so long headlines fold into fewer
-# lines (max ~3 instead of 4), which is what was pushing text down into
-# the progress bar / dots. Panel text column is ~280px wide at fontsize 21,
-# so 25 chars/line still fits comfortably without clipping.
+# Panel text column is ~280px wide at fontsize 21, so 25 chars/line fits
+# comfortably without clipping.
 for i in "${!RAW_LINES[@]}"; do
     idx=$((i + 1))
     echo "${RAW_LINES[$i]}" | fold -s -w 25 > "$ASSET_DIR/headline${idx}.txt"
 done
+
+# --- figure out how tall the tallest wrapped headline is --------------
+HEADLINE_FONTSIZE=21
+HEADLINE_LINE_SPACING=9
+HEADLINE_LINE_H=$((HEADLINE_FONTSIZE + HEADLINE_LINE_SPACING))
+MAX_HEADLINE_LINES=1
+for i in "${!RAW_LINES[@]}"; do
+    idx=$((i + 1))
+    lines=$(grep -c '' "$ASSET_DIR/headline${idx}.txt")
+    [ "$lines" -gt "$MAX_HEADLINE_LINES" ] && MAX_HEADLINE_LINES=$lines
+done
+echo "Longest headline wraps to $MAX_HEADLINE_LINES line(s)."
+
+HEADLINE_Y=218
+PROGRESS_Y=$((HEADLINE_Y + MAX_HEADLINE_LINES * HEADLINE_LINE_H + 12))
+DOTS_Y=$((PROGRESS_Y + 20))
+FACT_DIVIDER_Y=$((DOTS_Y + 40))
+FACT_LABEL_Y=$((FACT_DIVIDER_Y + 14))
+FACT_TEXT_Y=$((FACT_LABEL_Y + 20))
 
 # Build one long ticker string for the bottom scroll bar
 TICKER_STRING=""
@@ -125,11 +192,45 @@ if [ -f "facts.txt" ]; then
 fi
 if [ "${#FACTS[@]}" -eq 0 ]; then
     FACTS=(
-        "Light from the Cartwheel Galaxy took 500 million years to reach us."
-        "Webb sees infrared light invisible to the human eye."
-        "A day on Venus is longer than its year."
-        "There are more stars in the universe than grains of sand on Earth."
-    )
+    "A light-year is the distance light travels in one year, about 9.46 trillion kilometers."
+    "The James Webb Space Telescope can observe galaxies that formed more than 13 billion years ago."
+    "Neutron stars are so dense that a teaspoon of their material would weigh billions of tons on Earth."
+    "Saturn's rings are mostly made of ice particles, rocks, and dust."
+    "The Sun contains about 99.8 percent of the total mass in our solar system."
+    "The Milky Way galaxy contains hundreds of billions of stars."
+    "The Universe is estimated to be about 13.8 billion years old."
+    "A black hole's gravity is so strong that even light cannot escape from beyond its event horizon."
+    "Mars has the largest volcano in the solar system, Olympus Mons."
+    "Jupiter is the largest planet in our solar system."
+    "The Great Red Spot on Jupiter is a massive storm that has lasted for centuries."
+    "Earth is the only known planet with liquid water on its surface."
+    "The Moon is moving away from Earth by about 3.8 centimeters every year."
+    "Mercury is the closest planet to the Sun and has extreme temperature changes."
+    "Venus is the hottest planet in the solar system because of its thick carbon dioxide atmosphere."
+    "Uranus rotates on its side, likely due to a massive ancient collision."
+    "Neptune has the fastest winds recorded on any planet in the solar system."
+    "The asteroid belt lies between Mars and Jupiter and contains millions of rocky objects."
+    "Comets are made of ice, dust, and rocky material left over from the formation of the solar system."
+    "The International Space Station orbits Earth at roughly 400 kilometers above the surface."
+    "Space is not completely empty; it contains gas, dust, radiation, and tiny particles."
+    "The first human to walk on the Moon was Neil Armstrong in 1969."
+    "The Hubble Space Telescope has captured images of galaxies billions of light-years away."
+    "Dark matter cannot be seen directly but its gravity affects galaxies and cosmic structures."
+    "Dark energy is believed to be responsible for the accelerating expansion of the Universe."
+    "The Milky Way and Andromeda galaxies are expected to merge in several billion years."
+    "A supernova is the powerful explosion of a dying star."
+    "The core of the Sun reaches temperatures of about 15 million degrees Celsius."
+    "The closest star to Earth after the Sun is Proxima Centauri."
+    "Some exoplanets orbit stars outside our solar system and may have conditions suitable for life."
+    "The largest known structures in the Universe are galaxy clusters and cosmic filaments."
+    "Time moves differently near extremely strong gravitational fields, according to Einstein's relativity."
+    "The Voyager spacecraft have traveled farther from Earth than any other human-made objects."
+    "Earth's magnetic field protects the planet from harmful solar radiation."
+    "Auroras are created when charged particles from the Sun interact with Earth's atmosphere."
+    "The Milky Way has a supermassive black hole at its center called Sagittarius A*."
+    "The observable Universe contains billions of galaxies."
+    "Some stars are hundreds of times larger than the Sun."
+)
 fi
 FACT_N=${#FACTS[@]}
 FACT_CYCLE=$((FACT_N * FACT_SLOT))
@@ -144,15 +245,24 @@ printf 'DID YOU KNOW' > "$ASSET_DIR/fact_label.txt"
 #############################################
 
 # --- base video + background art -------------------------------
-# NOTE: vignette + eq removed — too expensive for a 2-core CI runner.
-# NOTE: resolution dropped to 1280x720 — 1080p30 is not realtime-encodable
-# on 2 vCPUs with this filter graph, regardless of preset.
 CHAIN="[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:black[video];"
 CHAIN+="[1:v]scale=1280:720:flags=fast_bilinear[ovl];"
-CHAIN+="[ovl][video]overlay=0:0[base];"
+CHAIN+="[ovl][video]overlay=0:0[base0];"
+
+# --- twinkling star overlay ---------------------------------------
+# Two star PNGs (inputs 2 and 3), phase-offset sine alpha pulsing so
+# roughly half the stars are brightening while the other half dims —
+# a cheap but convincing twinkle, no per-frame procedural cost.
+if [ "$STAR_LAYERS_ENABLED" = true ]; then
+    CHAIN+="[2:v]scale=1280:720,format=rgba,colorchannelmixer=aa='0.25+0.65*abs(sin(t*0.7))'[star_a];"
+    CHAIN+="[3:v]scale=1280:720,format=rgba,colorchannelmixer=aa='0.20+0.60*abs(sin(t*0.9+1.57))'[star_b];"
+    CHAIN+="[base0][star_a]overlay=0:0[base1];"
+    CHAIN+="[base1][star_b]overlay=0:0[base];"
+else
+    CHAIN+="[base0]null[base];"
+fi
 
 # --- left info panel with feathered (gradient-style) edge -----------------
-# NOTE: scaled to 333px wide (was 500px at 1080p) to match the 1280x720 frame.
 CHAIN+="[base]drawbox=x=0:y=0:w=333:h=720:color=black@0.60:t=fill[p1];"
 CHAIN+="[p1]drawbox=x=333:y=0:w=4:h=720:color=black@0.45:t=fill[p2];"
 CHAIN+="[p2]drawbox=x=337:y=0:w=4:h=720:color=black@0.30:t=fill[p3];"
@@ -165,10 +275,6 @@ CHAIN+="[p6]drawbox=x=27:y=28:w=11:h=11:color=${RED}:t=fill:enable='lt(mod(t\,1)
 CHAIN+="[p7]drawtext=fontfile=${FONT}:text='LIVE':fontcolor=white:fontsize=30:x=44:y=19[p8];"
 
 # --- credits + live UTC clock ----------------------------------------------
-# NOTE: was x=w-text_w-20, which right-aligns to the full 1280px frame —
-# that put this text floating over the video, outside the 333px panel.
-# Right-align to the panel's own right edge (313) instead, so it sits
-# under/beside the LIVE badge, inside the panel.
 CHAIN+="[p8]drawtext=fontfile=${FONT}:text='Credits\: NASA':fontcolor=white@0.85:fontsize=15:x=313-text_w:y=19[p9];"
 CHAIN+="[p9]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/clock.txt:reload=1:fontcolor=${GOLD}:fontsize=14:x=313-text_w:y=39[p10];"
 
@@ -182,7 +288,9 @@ CHAIN+="[p13]drawbox=x=33:y=159:w=8:h=8:color=${GOLD}:t=fill[p14];"
 CHAIN+="[p14]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/header.txt:fontcolor=${GOLD}:fontsize=15:x=49:y=156[p15];"
 
 # --- eyebrow category tag above the rotating headline -----------------
-CHAIN+="[p15]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/eyebrow.txt:fontcolor=${GOLD}@0.85:fontsize=12:x=33:y=187[p16];"
+# NOTE: reload=1 added — eyebrow.txt is now rewritten per-video (see
+# stream loop) to reflect that video's tag (Galaxy / Nebula / etc).
+CHAIN+="[p15]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/eyebrow.txt:reload=1:fontcolor=${GOLD}@0.85:fontsize=12:x=33:y=198[p16];"
 
 prev="p16"
 for i in "${!RAW_LINES[@]}"; do
@@ -191,25 +299,21 @@ for i in "${!RAW_LINES[@]}"; do
     end=$((start + SLOT))
     nxt="h${idx}"
     ALPHA="if(between(mod(t\,${CYCLE})\,${start}\,${end})\,if(lt(mod(t\,${CYCLE})-${start}\,0.6)\,(mod(t\,${CYCLE})-${start})/0.6\,if(gt(mod(t\,${CYCLE})-${start}\,${SLOT}-0.6)\,(${end}-mod(t\,${CYCLE}))/0.6\,1))\,0)"
-    CHAIN+="[${prev}]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/headline${idx}.txt:fontcolor=white:fontsize=21:line_spacing=9:x=33:y=207:alpha='${ALPHA}'[${nxt}];"
+    CHAIN+="[${prev}]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/headline${idx}.txt:fontcolor=white:fontsize=${HEADLINE_FONTSIZE}:line_spacing=${HEADLINE_LINE_SPACING}:x=33:y=${HEADLINE_Y}:alpha='${ALPHA}'[${nxt}];"
     prev="$nxt"
 done
 
 # --- animated progress bar: fills across current headline's time slot -----
-# NOTE: moved from y=313 -> y=328 to give a 3-line wrapped headline
-# (fontsize 21, line_spacing 9 => ~90px tall block starting at y=207)
-# enough clearance before this bar starts.
-CHAIN+="[${prev}]drawbox=x=33:y=328:w=280:h=2:color=white@0.15:t=fill[pg1];"
-CHAIN+="[pg1]drawbox=x=33:y=328:w='280*(mod(t\,${SLOT}))/${SLOT}':h=2:color=${GOLD}:t=fill[pg2];"
+CHAIN+="[${prev}]drawbox=x=33:y=${PROGRESS_Y}:w=280:h=2:color=white@0.15:t=fill[pg1];"
+CHAIN+="[pg1]drawbox=x=33:y=${PROGRESS_Y}:w='280*(mod(t\,${SLOT}))/${SLOT}':h=2:color=${GOLD}:t=fill[pg2];"
 prev="pg2"
 
 # --- background dots (dim) -------------------------------------------------
-# NOTE: moved from y=333 -> y=348 (kept 15px below the progress bar).
 for i in "${!RAW_LINES[@]}"; do
     idx=$((i + 1))
     x=$((33 + i * 17))
     nxt="db${idx}"
-    CHAIN+="[${prev}]drawbox=x=${x}:y=348:w=7:h=7:color=white@0.3:t=fill[${nxt}];"
+    CHAIN+="[${prev}]drawbox=x=${x}:y=${DOTS_Y}:w=7:h=7:color=white@0.3:t=fill[${nxt}];"
     prev="$nxt"
 done
 
@@ -222,20 +326,18 @@ for i in "${!RAW_LINES[@]}"; do
     end=$((start + SLOT))
     ENABLE="between(mod(t\,${CYCLE})\,${start}\,${end})"
     if [ "$i" -eq "$last" ]; then
-        CHAIN+="[${prev}]drawbox=x=${x}:y=348:w=7:h=7:color=${GOLD}:t=fill:enable='${ENABLE}'[pdotend];"
+        CHAIN+="[${prev}]drawbox=x=${x}:y=${DOTS_Y}:w=7:h=7:color=${GOLD}:t=fill:enable='${ENABLE}'[pdotend];"
         prev="pdotend"
     else
         nxt="da${idx}"
-        CHAIN+="[${prev}]drawbox=x=${x}:y=348:w=7:h=7:color=${GOLD}:t=fill:enable='${ENABLE}'[${nxt}];"
+        CHAIN+="[${prev}]drawbox=x=${x}:y=${DOTS_Y}:w=7:h=7:color=${GOLD}:t=fill:enable='${ENABLE}'[${nxt}];"
         prev="$nxt"
     fi
 done
 
 # --- rotating fun fact (fills empty space, adds periodic motion) ----------
-# NOTE: whole fact block shifted down ~15px (373->388, 387->402, 407->422)
-# to match the dots moving down.
-CHAIN+="[${prev}]drawbox=x=33:y=388:w=280:h=2:color=${GOLD}@0.4:t=fill[fp1];"
-CHAIN+="[fp1]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/fact_label.txt:fontcolor=${GOLD}@0.85:fontsize=12:x=33:y=402[fp2];"
+CHAIN+="[${prev}]drawbox=x=33:y=${FACT_DIVIDER_Y}:w=280:h=2:color=${GOLD}@0.4:t=fill[fp1];"
+CHAIN+="[fp1]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/fact_label.txt:fontcolor=${GOLD}@0.85:fontsize=12:x=33:y=${FACT_LABEL_Y}[fp2];"
 prev="fp2"
 for i in "${!FACTS[@]}"; do
     idx=$((i + 1))
@@ -243,15 +345,15 @@ for i in "${!FACTS[@]}"; do
     end=$((start + FACT_SLOT))
     nxt="f${idx}"
     FALPHA="if(between(mod(t\,${FACT_CYCLE})\,${start}\,${end})\,if(lt(mod(t\,${FACT_CYCLE})-${start}\,0.6)\,(mod(t\,${FACT_CYCLE})-${start})/0.6\,if(gt(mod(t\,${FACT_CYCLE})-${start}\,${FACT_SLOT}-0.6)\,(${end}-mod(t\,${FACT_CYCLE}))/0.6\,1))\,0)"
-    CHAIN+="[${prev}]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/fact${idx}.txt:fontcolor=white@0.9:fontsize=16:line_spacing=7:x=33:y=422:alpha='${FALPHA}'[${nxt}];"
+    CHAIN+="[${prev}]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/fact${idx}.txt:fontcolor=white@0.9:fontsize=16:line_spacing=7:x=33:y=${FACT_TEXT_Y}:alpha='${FALPHA}'[${nxt}];"
     prev="$nxt"
 done
 
 prev="$prev"
 
 # --- periodic subscribe CTA (fades in every 4 min for 8s) -----------------
-CTA_CYCLE=240   # total cycle length in seconds
-CTA_SHOW=8      # how long the CTA stays visible per cycle
+CTA_CYCLE=240
+CTA_SHOW=8
 CTA_START=0
 CTA_END=$CTA_SHOW
 CTA_ALPHA="if(between(mod(t\,${CTA_CYCLE})\,${CTA_START}\,${CTA_END})\,if(lt(mod(t\,${CTA_CYCLE})-${CTA_START}\,0.6)\,(mod(t\,${CTA_CYCLE})-${CTA_START})/0.6\,if(gt(mod(t\,${CTA_CYCLE})-${CTA_START}\,${CTA_SHOW}-0.6)\,(${CTA_END}-mod(t\,${CTA_CYCLE}))/0.6\,1))\,0)"
@@ -284,7 +386,6 @@ FILTER="$CHAIN"
 run_bumper() {
     local next_url="$1"
 
-    # Try to derive a readable title from the filename; fall back to generic.
     local raw title
     raw="${next_url##*/}"
     raw="${raw%.*}"
@@ -323,7 +424,7 @@ run_bumper() {
     -hide_banner \
     -loglevel warning \
     -loop 1 -t "$BUMPER_DURATION" -i overlay.png \
-    -f lavfi -t "$BUMPER_DURATION" -i anullsrc=r=48000:cc=2 \
+    -f lavfi -t "$BUMPER_DURATION" -i anullsrc=r=48000:cl=stereo \
     -filter_complex "$BFILTER" \
     -map "[final]" \
     -map 1:a \
@@ -372,6 +473,8 @@ run_video() {
         -re \
         -i "$url" \
         -loop 1 -i overlay.png \
+        -loop 1 -i "$ASSET_DIR/stars_a.png" \
+        -loop 1 -i "$ASSET_DIR/stars_b.png" \
         -filter_complex "$FILTER" \
         -map "[final]" \
         -map 0:a? \
@@ -420,13 +523,41 @@ run_video() {
 #############################################
 # Stream loop
 #############################################
-IFS=',' read -ra URLS <<< "$VIDEO_URL"
+# VIDEO_URL entries may optionally carry a category tag after "::",
+# e.g. VIDEO_URL="https://.../clip1.mp4::Nebula,https://.../clip2.mp4::Galaxy"
+# If no tag is given, it falls back to "Deep Space".
+# This is a manual tag, not live image detection — see note below the
+# script for why real-time scene detection isn't practical here.
+IFS=',' read -ra RAW_URLS <<< "$VIDEO_URL"
+URLS=()
+TAGS=()
+for u in "${RAW_URLS[@]}"; do
+    u="${u#"${u%%[![:space:]]*}"}"
+    u="${u%"${u##*[![:space:]]}"}"
+    [ -z "$u" ] && continue
+    if [[ "$u" == *"::"* ]]; then
+        tag="${u##*::}"
+        u="${u%%::*}"
+    else
+        tag="Deep Space"
+    fi
+    URLS+=("$u")
+    TAGS+=("$tag")
+done
 NUM_URLS=${#URLS[@]}
+if [ "$NUM_URLS" -eq 0 ]; then
+    echo "ERROR: VIDEO_URL contained no valid entries after parsing"
+    exit 1
+fi
 while true; do
     for ((i = 0; i < NUM_URLS; i++)); do
         url="${URLS[$i]}"
+        tag="${TAGS[$i]}"
         next_idx=$(( (i + 1) % NUM_URLS ))
         next_url="${URLS[$next_idx]}"
+
+        # Set the panel's category label for this video before it streams.
+        printf '%s REPORT' "$(echo "$tag" | tr '[:lower:]' '[:upper:]')" > "$ASSET_DIR/eyebrow.txt"
 
         run_video "$url"
 
