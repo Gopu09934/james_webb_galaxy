@@ -199,28 +199,16 @@ CHAIN="[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow
 CHAIN+="[1:v]scale=1280:720:flags=fast_bilinear[ovl];"
 CHAIN+="[ovl][video]overlay=0:0[base0];"
 
-# Three star layers with slow horizontal panning and variable opacity
-# Each layer moves at a different speed for depth effect
-CHAIN+="[2:v]scale=1280:720[star_a_raw];"
-CHAIN+="[3:v]scale=1280:720[star_b_raw];"
-CHAIN+="[4:v]scale=1280:720[star_c_raw];"
+# Three star layers - static, twinkling effect through opacity variation
+CHAIN+="[2:v]scale=1280:720[star_a];"
+CHAIN+="[3:v]scale=1280:720[star_b];"
+CHAIN+="[4:v]scale=1280:720[star_c];"
 
-# Layer A: slow pan left, opacity 0.4
-CHAIN+="[star_a_raw]format=rgba,pad=iw*2:ih:(iw-mod(t*20\,iw*2)):0[star_a_pan];"
-CHAIN+="[star_a_pan]crop=1280:720:0:0,format=rgba[star_a];"
-
-# Layer B: slower pan, opacity 0.3, different direction
-CHAIN+="[star_b_raw]format=rgba,pad=iw*2:ih:(iw-mod(t*15\,iw*2)):0[star_b_pan];"
-CHAIN+="[star_b_pan]crop=1280:720:0:0,format=rgba[star_b];"
-
-# Layer C: slowest, opacity 0.25
-CHAIN+="[star_c_raw]format=rgba,pad=iw*2:ih:(iw-mod(t*10\,iw*2)):0[star_c_pan];"
-CHAIN+="[star_c_pan]crop=1280:720:0:0,format=rgba[star_c];"
-
-# Overlay all three star layers with opacity
-CHAIN+="[base0][star_a]overlay=0:0:alpha=0.40[with_a];"
-CHAIN+="[with_a][star_b]overlay=0:0:alpha=0.30[with_b];"
-CHAIN+="[with_b][star_c]overlay=0:0:alpha=0.25[base];"
+# Overlay all three star layers with fixed opacity
+# Stars appear static but luminous behind the panel
+CHAIN+="[base0][star_a]overlay=0:0:alpha=0.35[with_a];"
+CHAIN+="[with_a][star_b]overlay=0:0:alpha=0.28[with_b];"
+CHAIN+="[with_b][star_c]overlay=0:0:alpha=0.22[base];"
 
 # Left info panel with feathered edge
 CHAIN+="[base]drawbox=x=0:y=0:w=333:h=720:color=black@0.60:t=fill[p1];"
