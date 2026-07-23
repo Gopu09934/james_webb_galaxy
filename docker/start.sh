@@ -253,6 +253,7 @@ CHAIN+="[ovl][video]overlay=0:0[base0];"
 # Two star PNGs (inputs 2 and 3), phase-offset sine alpha pulsing so
 # roughly half the stars are brightening while the other half dims —
 # a cheap but convincing twinkle, no per-frame procedural cost.
+
 if [ "$STAR_LAYERS_ENABLED" = true ]; then
     CHAIN+="[2:v]scale=1280:720,format=rgba[star_a];"
     CHAIN+="[3:v]scale=1280:720,format=rgba[star_b];"
@@ -262,6 +263,8 @@ if [ "$STAR_LAYERS_ENABLED" = true ]; then
 else
     CHAIN+="[base0]null[base];"
 fi
+
+    
 
 # --- left info panel with feathered (gradient-style) edge -----------------
 CHAIN+="[base]drawbox=x=0:y=0:w=333:h=720:color=black@0.60:t=fill[p1];"
