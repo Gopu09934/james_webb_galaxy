@@ -28,7 +28,7 @@ SLOT=6            # seconds each headline is shown
 FACT_SLOT=8       # seconds each fun fact is shown
 TICKER_SPEED=110  # pixels/second for the bottom ticker scroll
 
-ENABLE_BUMPER=true
+ENABLE_BUMPER=false
 BUMPER_DURATION=5
 BUMPER_MESSAGES=(
     "Stay tuned for more cosmic wonders"
@@ -91,9 +91,9 @@ def make_star_layer(path, count, min_size=1, max_size=2):
             d.ellipse([x - r, y - r, x + r, y + r], fill=color)
     img.save(path)
 
-make_star_layer(f"{out_dir}/stars_a.png", 30)   # reduced density layer
-make_star_layer(f"{out_dir}/stars_b.png", 25)   # reduced medium layer
-make_star_layer(f"{out_dir}/stars_c.png", 15)   # reduced sparse layer
+make_star_layer(f"{out_dir}/stars_a.png", 20)   # reduced density layer
+make_star_layer(f"{out_dir}/stars_b.png", 15)   # reduced medium layer
+make_star_layer(f"{out_dir}/stars_c.png", 10)   # reduced sparse layer
 PYEOF
 echo "✓ Generated 3 star layers: stars_a.png, stars_b.png, stars_c.png"
 
@@ -421,7 +421,7 @@ run_video() {
         -filter_complex "$FILTER" \
         -map "[final]" \
         -map 0:a? \
-        -r 30 \
+        -r 24 \
         -s 1280x720 \
         -c:v libx264 \
         -preset ultrafast \
@@ -430,9 +430,9 @@ run_video() {
         -profile:v high \
         -level 4.1 \
         -pix_fmt yuv420p \
-        -b:v 3000k \
-        -maxrate 3000k \
-        -bufsize 6000k \
+        -b:v 2000k \
+        -maxrate 2200k \
+        -bufsize 4400k \
         -g 60 \
         -keyint_min 60 \
         -sc_threshold 0 \
