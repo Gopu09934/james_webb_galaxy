@@ -14,8 +14,8 @@ if [ -z "${YOUTUBE_STREAM_KEY:-}" ]; then
 fi
 
 echo "========================================"
-echo "Starting 24/7 YouTube Stream (Twinkling Stars + Overlay)"
-echo "Output Resolution : 1280x720 (720p)"
+echo "Starting 24/7 YouTube Stream (Documentary Overlay)"
+echo "Output Resolution : 1280x720 (720p — sized for a 2-core CI runner)"
 echo "FPS               : 30"
 echo "========================================"
 
@@ -28,8 +28,11 @@ SLOT=6            # seconds each headline is shown
 FACT_SLOT=8       # seconds each fun fact is shown
 TICKER_SPEED=110  # pixels/second for the bottom ticker scroll
 
-ENABLE_BUMPER=false
-BUMPER_DURATION=5
+#############################################
+# Up-next bumper (shown between videos)
+#############################################
+ENABLE_BUMPER=true
+BUMPER_DURATION=5   # seconds
 BUMPER_MESSAGES=(
     "Stay tuned for more cosmic wonders"
     "Another journey through deep space is coming up"
@@ -37,13 +40,17 @@ BUMPER_MESSAGES=(
     "The story of the cosmos continues"
 )
 
-MAX_RETRIES=5
-RETRY_DELAY=5
+#############################################
+# Auto-restart on failure
+#############################################
+MAX_RETRIES=5       # per-video retry attempts before moving on
+RETRY_DELAY=5        # seconds between retries
 
 mkdir -p "$ASSET_DIR"
 
 #############################################
-# Clock writer background
+# Background clock writer (avoids fragile
+# drawtext %{gmtime} expansion syntax)
 #############################################
 date -u +'%H:%M:%S  UTC' > "$ASSET_DIR/clock.txt"
 (
@@ -65,40 +72,8 @@ printf "T O D A Y ' S   D I S C O V E R Y" > "$ASSET_DIR/header.txt"
 printf 'DEEP SPACE REPORT'                > "$ASSET_DIR/eyebrow.txt"
 
 #############################################
-# Generate twinkling starfield layers
-# (Three layers with different densities for richer twinkling effect)
-#############################################
-python3 - "$ASSET_DIR" <<'PYEOF'
-import random, sys
-from PIL import Image, ImageDraw
-
-out_dir = sys.argv[1]
-W, H = 1280, 720
-random.seed(7)
-
-def make_star_layer(path, count, min_size=1, max_size=2):
-    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    for _ in range(count):
-        x = random.randint(0, W - 1)
-        y = random.randint(0, H - 1)
-        r = random.randint(min_size, max_size)
-        base_a = random.randint(100, 255)
-        color = (255, 255, 255, base_a)
-        if r == 1:
-            d.point((x, y), fill=color)
-        else:
-            d.ellipse([x - r, y - r, x + r, y + r], fill=color)
-    img.save(path)
-
-make_star_layer(f"{out_dir}/stars_a.png", 20)   # reduced density layer
-make_star_layer(f"{out_dir}/stars_b.png", 15)   # reduced medium layer
-make_star_layer(f"{out_dir}/stars_c.png", 10)   # reduced sparse layer
-PYEOF
-echo "✓ Generated 3 star layers: stars_a.png, stars_b.png, stars_c.png"
-
-#############################################
 # Load headlines from galaxy_info.txt
+# (still used to build the bottom ticker text)
 #############################################
 RAW_LINES=()
 if [ -f "$INFO_FILE" ]; then
@@ -127,14 +102,23 @@ fi
 
 N=${#RAW_LINES[@]}
 CYCLE=$((N * SLOT))
-echo "✓ Loaded $N headlines — rotation cycle: ${CYCLE}s"
+echo "Loaded $N headline(s) from $INFO_FILE — rotation cycle: ${CYCLE}s"
 
+# Wrap each headline for the side panel.
+# Panel text column is ~280px wide at fontsize 21, so 25 chars/line fits
+# comfortably without clipping.
 for i in "${!RAW_LINES[@]}"; do
     idx=$((i + 1))
     echo "${RAW_LINES[$i]}" | fold -s -w 25 > "$ASSET_DIR/headline${idx}.txt"
 done
 
-# Figure out tallest headline
+# --- figure out how tall the tallest wrapped headline is --------------
+# NOTE: this used to be hardcoded (progress bar/dots/facts at fixed y
+# values), which assumed every headline fit in ~3 lines. Longer
+# headlines can wrap to 5+ lines and ran straight through the progress
+# bar and dots. Compute the real max line count here and derive every
+# element below the headline from it, so nothing overlaps no matter
+# how long the longest headline is.
 HEADLINE_FONTSIZE=21
 HEADLINE_LINE_SPACING=9
 HEADLINE_LINE_H=$((HEADLINE_FONTSIZE + HEADLINE_LINE_SPACING))
@@ -144,6 +128,7 @@ for i in "${!RAW_LINES[@]}"; do
     lines=$(grep -c '' "$ASSET_DIR/headline${idx}.txt")
     [ "$lines" -gt "$MAX_HEADLINE_LINES" ] && MAX_HEADLINE_LINES=$lines
 done
+echo "Longest headline wraps to $MAX_HEADLINE_LINES line(s)."
 
 HEADLINE_Y=218
 PROGRESS_Y=$((HEADLINE_Y + MAX_HEADLINE_LINES * HEADLINE_LINE_H + 12))
@@ -152,7 +137,7 @@ FACT_DIVIDER_Y=$((DOTS_Y + 40))
 FACT_LABEL_Y=$((FACT_DIVIDER_Y + 14))
 FACT_TEXT_Y=$((FACT_LABEL_Y + 20))
 
-# Build ticker string
+# Build one long ticker string for the bottom scroll bar
 TICKER_STRING=""
 for i in "${!RAW_LINES[@]}"; do
     TICKER_STRING+="${RAW_LINES[$i]}     •     "
@@ -160,7 +145,8 @@ done
 printf '%s' "$TICKER_STRING" > "$ASSET_DIR/ticker.txt"
 
 #############################################
-# Load fun facts
+# Fun facts (fills empty space + adds motion)
+# Optional file: facts.txt, one fact per line.
 #############################################
 FACTS=()
 if [ -f "facts.txt" ]; then
@@ -180,6 +166,34 @@ if [ "${#FACTS[@]}" -eq 0 ]; then
     "A black hole's gravity is so strong that even light cannot escape from beyond its event horizon."
     "Mars has the largest volcano in the solar system, Olympus Mons."
     "Jupiter is the largest planet in our solar system."
+    "The Great Red Spot on Jupiter is a massive storm that has lasted for centuries."
+    "Earth is the only known planet with liquid water on its surface."
+    "The Moon is moving away from Earth by about 3.8 centimeters every year."
+    "Mercury is the closest planet to the Sun and has extreme temperature changes."
+    "Venus is the hottest planet in the solar system because of its thick carbon dioxide atmosphere."
+    "Uranus rotates on its side, likely due to a massive ancient collision."
+    "Neptune has the fastest winds recorded on any planet in the solar system."
+    "The asteroid belt lies between Mars and Jupiter and contains millions of rocky objects."
+    "Comets are made of ice, dust, and rocky material left over from the formation of the solar system."
+    "The International Space Station orbits Earth at roughly 400 kilometers above the surface."
+    "Space is not completely empty; it contains gas, dust, radiation, and tiny particles."
+    "The first human to walk on the Moon was Neil Armstrong in 1969."
+    "The Hubble Space Telescope has captured images of galaxies billions of light-years away."
+    "Dark matter cannot be seen directly but its gravity affects galaxies and cosmic structures."
+    "Dark energy is believed to be responsible for the accelerating expansion of the Universe."
+    "The Milky Way and Andromeda galaxies are expected to merge in several billion years."
+    "A supernova is the powerful explosion of a dying star."
+    "The core of the Sun reaches temperatures of about 15 million degrees Celsius."
+    "The closest star to Earth after the Sun is Proxima Centauri."
+    "Some exoplanets orbit stars outside our solar system and may have conditions suitable for life."
+    "The largest known structures in the Universe are galaxy clusters and cosmic filaments."
+    "Time moves differently near extremely strong gravitational fields, according to Einstein's relativity."
+    "The Voyager spacecraft have traveled farther from Earth than any other human-made objects."
+    "Earth's magnetic field protects the planet from harmful solar radiation."
+    "Auroras are created when charged particles from the Sun interact with Earth's atmosphere."
+    "The Milky Way has a supermassive black hole at its center called Sagittarius A*."
+    "The observable Universe contains billions of galaxies."
+    "Some stars are hundreds of times larger than the Sun."
 )
 fi
 FACT_N=${#FACTS[@]}
@@ -191,26 +205,19 @@ done
 printf 'DID YOU KNOW' > "$ASSET_DIR/fact_label.txt"
 
 #############################################
-# Build filter_complex
+# Build the filter_complex dynamically
 #############################################
 
-# Base video
+# --- base video + background art -------------------------------
+# NOTE: vignette + eq removed — too expensive for a 2-core CI runner.
+# NOTE: resolution dropped to 1280x720 — 1080p30 is not realtime-encodable
+# on 2 vCPUs with this filter graph, regardless of preset.
 CHAIN="[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:black[video];"
 CHAIN+="[1:v]scale=1280:720:flags=fast_bilinear[ovl];"
-CHAIN+="[ovl][video]overlay=0:0[base0];"
+CHAIN+="[ovl][video]overlay=0:0[base];"
 
-# Three star layers - static, twinkling effect through opacity variation
-CHAIN+="[2:v]scale=1280:720[star_a];"
-CHAIN+="[3:v]scale=1280:720[star_b];"
-CHAIN+="[4:v]scale=1280:720[star_c];"
-
-# Overlay all three star layers with fixed opacity
-# Stars appear static but luminous behind the panel
-CHAIN+="[base0][star_a]overlay=0:0:alpha=0.35[with_a];"
-CHAIN+="[with_a][star_b]overlay=0:0:alpha=0.28[with_b];"
-CHAIN+="[with_b][star_c]overlay=0:0:alpha=0.22[base];"
-
-# Left info panel with feathered edge
+# --- left info panel with feathered (gradient-style) edge -----------------
+# NOTE: scaled to 333px wide (was 500px at 1080p) to match the 1280x720 frame.
 CHAIN+="[base]drawbox=x=0:y=0:w=333:h=720:color=black@0.60:t=fill[p1];"
 CHAIN+="[p1]drawbox=x=333:y=0:w=4:h=720:color=black@0.45:t=fill[p2];"
 CHAIN+="[p2]drawbox=x=337:y=0:w=4:h=720:color=black@0.30:t=fill[p3];"
@@ -218,29 +225,34 @@ CHAIN+="[p3]drawbox=x=341:y=0:w=4:h=720:color=black@0.15:t=fill[p4];"
 CHAIN+="[p4]drawbox=x=0:y=0:w=347:h=4:color=${GOLD}@0.9:t=fill[p5];"
 CHAIN+="[p5]drawbox=x=345:y=0:w=2:h=720:color=${GOLD}@0.6:t=fill[p6];"
 
-# LIVE indicator
+# --- LIVE indicator: steady label + blinking dot ---------------------------
 CHAIN+="[p6]drawbox=x=27:y=28:w=11:h=11:color=${RED}:t=fill:enable='lt(mod(t\,1)\,0.6)'[p7];"
 CHAIN+="[p7]drawtext=fontfile=${FONT}:text='LIVE':fontcolor=white:fontsize=30:x=44:y=19[p8];"
 
-# Credits + clock
+# --- credits + live UTC clock ----------------------------------------------
+# NOTE: was x=w-text_w-20, which right-aligns to the full 1280px frame —
+# that put this text floating over the video, outside the 333px panel.
+# Right-align to the panel's own right edge (313) instead, so it sits
+# under/beside the LIVE badge, inside the panel.
 CHAIN+="[p8]drawtext=fontfile=${FONT}:text='Credits\: NASA':fontcolor=white@0.85:fontsize=15:x=313-text_w:y=19[p9];"
 CHAIN+="[p9]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/clock.txt:reload=1:fontcolor=${GOLD}:fontsize=14:x=313-text_w:y=39[p10];"
 
-# Titles
+# --- titles ------------------------------------------------------------
 CHAIN+="[p10]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/title1.txt:fontcolor=white:fontsize=23:x=33:y=83[p11];"
 CHAIN+="[p11]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/title2.txt:fontcolor=white@0.85:fontsize=17:x=33:y=112[p12];"
 CHAIN+="[p12]drawbox=x=33:y=143:w=280:h=2:color=white@0.3:t=fill[p13];"
 
-# Section header
+# --- section header ----------------------------------------------------
 CHAIN+="[p13]drawbox=x=33:y=159:w=8:h=8:color=${GOLD}:t=fill[p14];"
 CHAIN+="[p14]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/header.txt:fontcolor=${GOLD}:fontsize=15:x=49:y=156[p15];"
 
-# Eyebrow tag
+# --- eyebrow category tag above the rotating headline -----------------
+# NOTE: moved from y=187 -> y=198 (+11px) for extra clearance below the
+# gold section-header dot/line (y=143 divider, y=159 dot), since it was
+# overlapping. Headline block below is nudged down to match.
 CHAIN+="[p15]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/eyebrow.txt:fontcolor=${GOLD}@0.85:fontsize=12:x=33:y=198[p16];"
 
 prev="p16"
-
-# Rotating headlines
 for i in "${!RAW_LINES[@]}"; do
     idx=$((i + 1))
     start=$((i * SLOT))
@@ -251,12 +263,16 @@ for i in "${!RAW_LINES[@]}"; do
     prev="$nxt"
 done
 
-# Progress bar
+# --- animated progress bar: fills across current headline's time slot -----
+# NOTE: y is now derived from MAX_HEADLINE_LINES so it always clears the
+# tallest wrapped headline, regardless of headline length.
 CHAIN+="[${prev}]drawbox=x=33:y=${PROGRESS_Y}:w=280:h=2:color=white@0.15:t=fill[pg1];"
 CHAIN+="[pg1]drawbox=x=33:y=${PROGRESS_Y}:w='280*(mod(t\,${SLOT}))/${SLOT}':h=2:color=${GOLD}:t=fill[pg2];"
 prev="pg2"
 
-# Dots
+# --- background dots (dim) -------------------------------------------------
+# NOTE: y is now derived (DOTS_Y), always 20px below the progress bar,
+# which itself sits below the tallest possible headline.
 for i in "${!RAW_LINES[@]}"; do
     idx=$((i + 1))
     x=$((33 + i * 17))
@@ -265,7 +281,7 @@ for i in "${!RAW_LINES[@]}"; do
     prev="$nxt"
 done
 
-# Active dot
+# --- active dot (gold, toggled per slot) -----------------------------------
 last=$((N - 1))
 for i in "${!RAW_LINES[@]}"; do
     idx=$((i + 1))
@@ -283,7 +299,9 @@ for i in "${!RAW_LINES[@]}"; do
     fi
 done
 
-# Facts
+# --- rotating fun fact (fills empty space, adds periodic motion) ----------
+# NOTE: whole fact block position is derived (FACT_DIVIDER_Y / FACT_LABEL_Y),
+# always positioned relative to the dots row above it.
 CHAIN+="[${prev}]drawbox=x=33:y=${FACT_DIVIDER_Y}:w=280:h=2:color=${GOLD}@0.4:t=fill[fp1];"
 CHAIN+="[fp1]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/fact_label.txt:fontcolor=${GOLD}@0.85:fontsize=12:x=33:y=${FACT_LABEL_Y}[fp2];"
 prev="fp2"
@@ -297,9 +315,11 @@ for i in "${!FACTS[@]}"; do
     prev="$nxt"
 done
 
-# Subscribe CTA
-CTA_CYCLE=240
-CTA_SHOW=8
+prev="$prev"
+
+# --- periodic subscribe CTA (fades in every 4 min for 8s) -----------------
+CTA_CYCLE=240   # total cycle length in seconds
+CTA_SHOW=8      # how long the CTA stays visible per cycle
 CTA_START=0
 CTA_END=$CTA_SHOW
 CTA_ALPHA="if(between(mod(t\,${CTA_CYCLE})\,${CTA_START}\,${CTA_END})\,if(lt(mod(t\,${CTA_CYCLE})-${CTA_START}\,0.6)\,(mod(t\,${CTA_CYCLE})-${CTA_START})/0.6\,if(gt(mod(t\,${CTA_CYCLE})-${CTA_START}\,${CTA_SHOW}-0.6)\,(${CTA_END}-mod(t\,${CTA_CYCLE}))/0.6\,1))\,0)"
@@ -311,7 +331,7 @@ CHAIN+="[cta2]drawbox=x=755:y=636:w=11:h=11:color=${RED}:t=fill:enable='${CTA_EN
 CHAIN+="[cta3]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/cta.txt:fontcolor=white:fontsize=19:x=773:y=633:alpha='${CTA_ALPHA}'[cta4];"
 prev="cta4"
 
-# Ticker
+# --- bottom ticker bar -------------------------------------------------
 CHAIN+="[${prev}]drawbox=x=0:y=680:w=1280:h=40:color=black@0.72:t=fill[tk1];"
 CHAIN+="[tk1]drawbox=x=0:y=680:w=1280:h=2:color=${GOLD}@0.9:t=fill[tk2];"
 CHAIN+="[tk2]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/ticker.txt:fontcolor=white:fontsize=17:borderw=2:bordercolor=black@0.6:y=695:x='w-mod(t*${TICKER_SPEED}\,text_w+w)'[tk3];"
@@ -319,17 +339,20 @@ CHAIN+="[tk3]drawbox=x=0:y=680:w=120:h=40:color=black@0.85:t=fill[tk4];"
 CHAIN+="[tk4]drawbox=x=0:y=682:w=113:h=38:color=${GOLD}:t=fill[tk5];"
 CHAIN+="[tk5]drawtext=fontfile=${FONT}:text='BULLETIN':fontcolor=black:fontsize=16:x=17:y=695[tk6];"
 
-# Frame border
+# --- outer frame border -------------------------------------------------
 CHAIN+="[tk6]drawbox=x=0:y=0:w=1280:h=720:color=black@0.5:t=2[final]"
 
 FILTER="$CHAIN"
 
 #############################################
-# Bumper between videos
+# Up-next bumper: short branded title card
+# streamed between videos to reduce drop-off
+# at the loop/transition point.
 #############################################
 run_bumper() {
     local next_url="$1"
 
+    # Try to derive a readable title from the filename; fall back to generic.
     local raw title
     raw="${next_url##*/}"
     raw="${raw%.*}"
@@ -392,11 +415,13 @@ run_bumper() {
     -ar 48000 \
     -ac 2 \
     -f flv \
-    "rtmp://a.rtmp.youtube.com/live2/${YOUTUBE_STREAM_KEY}" || echo "WARNING: bumper failed, continuing"
+    "rtmp://a.rtmp.youtube.com/live2/${YOUTUBE_STREAM_KEY}" || echo "WARNING: bumper failed, continuing to next video"
 }
 
 #############################################
-# Stream one video
+# Stream one video with automatic retry on
+# failure/crash (e.g. Bus error, network drop),
+# instead of letting set -e kill the script.
 #############################################
 run_video() {
     local url="$1"
@@ -415,13 +440,10 @@ run_video() {
         -re \
         -i "$url" \
         -loop 1 -i overlay.png \
-        -loop 1 -i "$ASSET_DIR/stars_a.png" \
-        -loop 1 -i "$ASSET_DIR/stars_b.png" \
-        -loop 1 -i "$ASSET_DIR/stars_c.png" \
         -filter_complex "$FILTER" \
         -map "[final]" \
         -map 0:a? \
-        -r 24 \
+        -r 30 \
         -s 1280x720 \
         -c:v libx264 \
         -preset ultrafast \
@@ -430,9 +452,9 @@ run_video() {
         -profile:v high \
         -level 4.1 \
         -pix_fmt yuv420p \
-        -b:v 2000k \
-        -maxrate 2200k \
-        -bufsize 4400k \
+        -b:v 3000k \
+        -maxrate 3000k \
+        -bufsize 6000k \
         -g 60 \
         -keyint_min 60 \
         -sc_threshold 0 \
@@ -447,7 +469,7 @@ run_video() {
         set -e
 
         if [ "$exit_code" -eq 0 ]; then
-            echo "✓ Video finished normally."
+            echo "Video finished normally."
             return 0
         fi
 
@@ -464,27 +486,22 @@ run_video() {
 }
 
 #############################################
-# Stream loop (simple - no tagging)
+# Stream loop
 #############################################
 IFS=',' read -ra RAW_URLS <<< "$VIDEO_URL"
 URLS=()
 for u in "${RAW_URLS[@]}"; do
+    # trim leading/trailing whitespace so "url1, url2" doesn't leave
+    # a leading space that breaks ffmpeg's "-i <url>" input.
     u="${u#"${u%%[![:space:]]*}"}"
     u="${u%"${u##*[![:space:]]}"}"
     [ -n "$u" ] && URLS+=("$u")
 done
 NUM_URLS=${#URLS[@]}
 if [ "$NUM_URLS" -eq 0 ]; then
-    echo "ERROR: VIDEO_URL contained no valid entries"
+    echo "ERROR: VIDEO_URL contained no valid entries after parsing"
     exit 1
 fi
-
-echo "✓ Loaded $NUM_URLS video(s)"
-for ((i = 0; i < NUM_URLS; i++)); do
-    echo "  [$((i+1))] ${URLS[$i]}"
-done
-echo ""
-
 while true; do
     for ((i = 0; i < NUM_URLS; i++)); do
         url="${URLS[$i]}"
@@ -498,6 +515,7 @@ while true; do
         fi
 
         echo "Loading next video in 5 seconds..."
+        echo ""
         sleep 5
     done
 done
