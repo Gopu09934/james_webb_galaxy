@@ -1,23 +1,26 @@
-FROM ubuntu:24.04
+name: Stream
 
-ENV DEBIAN_FRONTEND=noninteractive
+on:
+  workflow_dispatch:
+  schedule:
+   - cron: "0 */5 * * *"
 
-RUN apt-get update && \
-    apt-get install -y \
-        ffmpeg \
-        curl \
-        ca-certificates \
-        python3 \
-        python3-pip && \
-    pip3 install --break-system-packages Pillow && \
-    rm -rf /var/lib/apt/lists/*
+jobs:
+  stream:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
 
-WORKDIR /app
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-COPY start.sh .
-COPY overlay.png .
-COPY font.ttf .
+      - name: Build Docker image
+        run: |
+          docker build -t yt-stream ./docker
 
-RUN chmod +x start.sh
-
-CMD ["./start.sh"]
+      - name: Start YouTube Stream
+        run: |
+          docker run \
+            -e VIDEO_URL="${{ secrets.VIDEO_URL }}" \
+            -e YOUTUBE_STREAM_KEY="${{ secrets.YOUTUBE_STREAM_KEY }}" \
+            yt-stream
