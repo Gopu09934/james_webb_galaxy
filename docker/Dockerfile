@@ -1,26 +1,20 @@
-name: Stream
+FROM ubuntu:24.04
 
-on:
-  workflow_dispatch:
-  schedule:
-   - cron: "0 */5 * * *"
+ENV DEBIAN_FRONTEND=noninteractive
 
-jobs:
-  stream:
-    runs-on: ubuntu-latest
-    timeout-minutes: 360
+RUN apt-get update && \
+    apt-get install -y \
+        ffmpeg \
+        curl \
+        ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+WORKDIR /app
 
-      - name: Build Docker image
-        run: |
-          docker build -t yt-stream ./docker
+COPY start.sh .
+COPY overlay.png .
+COPY font.ttf .
 
-      - name: Start YouTube Stream
-        run: |
-          docker run \
-            -e VIDEO_URL="${{ secrets.VIDEO_URL }}" \
-            -e YOUTUBE_STREAM_KEY="${{ secrets.YOUTUBE_STREAM_KEY }}" \
-            yt-stream
+RUN chmod +x start.sh
+
+CMD ["./start.sh"]
