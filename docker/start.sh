@@ -430,10 +430,9 @@ build_final_filter() {
     tail+="[tk5]drawtext=fontfile=${FONT}:text='BULLETIN':fontcolor=black:fontsize=16:x=17:y=695[tk6];"
 
     # --- watermark: channel name, low-opacity, bottom-left ---------------
-    # NOTE: moved from bottom-right to bottom-left — YouTube's own native
-    # subscribe-bell overlay tends to render bottom-right, which collided
-    # with this text.
-    tail+="[tk6]drawtext=fontfile=${FONT}:text='${CHANNEL_NAME}':fontcolor=white@0.35:fontsize=15:x=353:y=655[wm1];"
+    # NOTE: bordered like the ticker text — plain translucent text was
+    # disappearing against bright/light parts of the video underneath it.
+    tail+="[tk6]drawtext=fontfile=${FONT}:text='${CHANNEL_NAME}':fontcolor=white@0.55:fontsize=15:borderw=1.5:bordercolor=black@0.7:x=353:y=655[wm1];"
 
     # --- outer frame border -------------------------------------------------
     tail+="[wm1]drawbox=x=0:y=0:w=1280:h=720:color=black@0.5:t=2[final]"
