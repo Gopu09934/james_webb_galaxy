@@ -87,7 +87,11 @@ if [ "$SHOW_STATS" = true ]; then
             RESP=$(curl -s "https://www.googleapis.com/youtube/v3/channels?part=statistics&id=${YOUTUBE_CHANNEL_ID}&key=${YOUTUBE_API_KEY}" || true)
             COUNT=$(echo "$RESP" | grep -o '"subscriberCount"[^"]*"[0-9]*"' | grep -oE '[0-9]+')
             if [ -n "$COUNT" ]; then
-                FORMATTED=$(printf "%'d" "$COUNT" 2>/dev/null || echo "$COUNT")
+                # Manual comma insertion — locale-independent, so it works
+                # the same regardless of the container's default locale
+                # (printf "%'d" silently fails to group digits under the
+                # bare "C" locale that Ubuntu containers ship with).
+                FORMATTED=$(echo "$COUNT" | rev | sed 's/\(...\)/\1,/g' | rev | sed 's/^,//')
                 printf '%s subscribers' "$FORMATTED" > "$ASSET_DIR/subs.txt.tmp"
                 mv -f "$ASSET_DIR/subs.txt.tmp" "$ASSET_DIR/subs.txt"
                 WARNED_ONCE=false
@@ -425,8 +429,11 @@ build_final_filter() {
     tail+="[tk4]drawbox=x=0:y=682:w=113:h=38:color=${GOLD}:t=fill[tk5];"
     tail+="[tk5]drawtext=fontfile=${FONT}:text='BULLETIN':fontcolor=black:fontsize=16:x=17:y=695[tk6];"
 
-    # --- watermark: channel name, low-opacity, bottom-right ---------------
-    tail+="[tk6]drawtext=fontfile=${FONT}:text='${CHANNEL_NAME}':fontcolor=white@0.35:fontsize=15:x=1260-text_w:y=655[wm1];"
+    # --- watermark: channel name, low-opacity, bottom-left ---------------
+    # NOTE: moved from bottom-right to bottom-left — YouTube's own native
+    # subscribe-bell overlay tends to render bottom-right, which collided
+    # with this text.
+    tail+="[tk6]drawtext=fontfile=${FONT}:text='${CHANNEL_NAME}':fontcolor=white@0.35:fontsize=15:x=353:y=655[wm1];"
 
     # --- outer frame border -------------------------------------------------
     tail+="[wm1]drawbox=x=0:y=0:w=1280:h=720:color=black@0.5:t=2[final]"
