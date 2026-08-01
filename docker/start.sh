@@ -85,7 +85,7 @@ if [ "$SHOW_STATS" = true ]; then
         WARNED_ONCE=false
         while true; do
             RESP=$(curl -s "https://www.googleapis.com/youtube/v3/channels?part=statistics&id=${YOUTUBE_CHANNEL_ID}&key=${YOUTUBE_API_KEY}" || true)
-            COUNT=$(echo "$RESP" | grep -o '"subscriberCount"[^"]*"[0-9]*"' | grep -o '[0-9]*$')
+            COUNT=$(echo "$RESP" | grep -o '"subscriberCount"[^"]*"[0-9]*"' | grep -oE '[0-9]+')
             if [ -n "$COUNT" ]; then
                 FORMATTED=$(printf "%'d" "$COUNT" 2>/dev/null || echo "$COUNT")
                 printf '%s subscribers' "$FORMATTED" > "$ASSET_DIR/subs.txt.tmp"
