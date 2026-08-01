@@ -1,26 +1,23 @@
 name: Stream
-
 on:
   workflow_dispatch:
   schedule:
    - cron: "0 */5 * * *"
-
 jobs:
   stream:
     runs-on: ubuntu-latest
     timeout-minutes: 360
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
       - name: Build Docker image
         run: |
           docker build -t yt-stream ./docker
-
       - name: Start YouTube Stream
         run: |
           docker run \
             -e VIDEO_URL="${{ secrets.VIDEO_URL }}" \
             -e YOUTUBE_STREAM_KEY="${{ secrets.YOUTUBE_STREAM_KEY }}" \
+            -e YOUTUBE_API_KEY="${{ secrets.YOUTUBE_API_KEY }}" \
+            -e YOUTUBE_CHANNEL_ID="${{ secrets.YOUTUBE_CHANNEL_ID }}" \
             yt-stream
