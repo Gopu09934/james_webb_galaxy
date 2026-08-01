@@ -13,6 +13,15 @@ if [ -z "${YOUTUBE_STREAM_KEY:-}" ]; then
     exit 1
 fi
 
+# Subscriber count + live viewer count are optional — if the API creds
+# aren't provided, those panel elements just stay blank instead of
+# failing the whole stream.
+SHOW_STATS=true
+if [ -z "${YOUTUBE_API_KEY:-}" ] || [ -z "${YOUTUBE_CHANNEL_ID:-}" ]; then
+    echo "NOTICE: YOUTUBE_API_KEY / YOUTUBE_CHANNEL_ID not set — subscriber/viewer stats will be hidden."
+    SHOW_STATS=false
+fi
+
 echo "========================================"
 echo "Starting 24/7 YouTube Stream (Documentary Overlay)"
 echo "Output Resolution : 1280x720 (720p — sized for a 2-core CI runner)"
@@ -27,6 +36,7 @@ INFO_FILE="galaxy_info.txt"
 SLOT=6            # seconds each headline is shown
 FACT_SLOT=8       # seconds each fun fact is shown
 TICKER_SPEED=110  # pixels/second for the bottom ticker scroll
+CHANNEL_NAME="Technical Talk India"
 
 #############################################
 # Up-next bumper (shown between videos)
@@ -61,7 +71,69 @@ date -u +'%H:%M:%S  UTC' > "$ASSET_DIR/clock.txt"
     done
 ) &
 CLOCK_PID=$!
-trap 'kill "$CLOCK_PID" 2>/dev/null || true' EXIT
+
+#############################################
+# Background subscriber-count writer
+# (polls YouTube Data API every 60s — subs
+# don't change second to second, and this
+# respects API quota)
+#############################################
+printf ' ' > "$ASSET_DIR/subs.txt"
+SUBS_PID=""
+if [ "$SHOW_STATS" = true ]; then
+    (
+        while true; do
+            RESP=$(curl -s "https://www.googleapis.com/youtube/v3/channels?part=statistics&id=${YOUTUBE_CHANNEL_ID}&key=${YOUTUBE_API_KEY}" || true)
+            COUNT=$(echo "$RESP" | grep -o '"subscriberCount"[^"]*"[0-9]*"' | grep -o '[0-9]*$')
+            if [ -n "$COUNT" ]; then
+                FORMATTED=$(printf "%'d" "$COUNT" 2>/dev/null || echo "$COUNT")
+                printf '%s subscribers' "$FORMATTED" > "$ASSET_DIR/subs.txt.tmp"
+                mv -f "$ASSET_DIR/subs.txt.tmp" "$ASSET_DIR/subs.txt"
+            fi
+            sleep 60
+        done
+    ) &
+    SUBS_PID=$!
+fi
+
+#############################################
+# Background live-viewer-count writer
+# Strategy: find the channel's currently-live
+# video once (search.list — costs more quota,
+# so only called when we don't already have an
+# id), then poll videos.list (cheap, 1 unit)
+# every 30s for concurrentViewers. If the
+# broadcast ends/restarts, re-search.
+#############################################
+printf ' ' > "$ASSET_DIR/viewers.txt"
+VIEWERS_PID=""
+if [ "$SHOW_STATS" = true ]; then
+    (
+        LIVE_VIDEO_ID=""
+        while true; do
+            if [ -z "$LIVE_VIDEO_ID" ]; then
+                SEARCH_RESP=$(curl -s "https://www.googleapis.com/youtube/v3/search?part=id&channelId=${YOUTUBE_CHANNEL_ID}&eventType=live&type=video&key=${YOUTUBE_API_KEY}" || true)
+                LIVE_VIDEO_ID=$(echo "$SEARCH_RESP" | grep -o '"videoId": *"[^"]*"' | head -1 | sed -E 's/.*"videoId": *"([^"]*)".*/\1/')
+            fi
+            if [ -n "$LIVE_VIDEO_ID" ]; then
+                VRESP=$(curl -s "https://www.googleapis.com/youtube/v3/videos?part=liveStreamingDetails&id=${LIVE_VIDEO_ID}&key=${YOUTUBE_API_KEY}" || true)
+                VIEWERS=$(echo "$VRESP" | grep -o '"concurrentViewers": *"[0-9]*"' | grep -o '[0-9]*')
+                if [ -n "$VIEWERS" ]; then
+                    printf '%s watching now' "$VIEWERS" > "$ASSET_DIR/viewers.txt.tmp"
+                    mv -f "$ASSET_DIR/viewers.txt.tmp" "$ASSET_DIR/viewers.txt"
+                else
+                    # Broadcast ended or hasn't registered yet — clear and re-search.
+                    LIVE_VIDEO_ID=""
+                    printf ' ' > "$ASSET_DIR/viewers.txt"
+                fi
+            fi
+            sleep 30
+        done
+    ) &
+    VIEWERS_PID=$!
+fi
+
+trap 'kill "$CLOCK_PID" 2>/dev/null || true; [ -n "$SUBS_PID" ] && kill "$SUBS_PID" 2>/dev/null || true; [ -n "$VIEWERS_PID" ] && kill "$VIEWERS_PID" 2>/dev/null || true' EXIT
 
 #############################################
 # Static panel text
@@ -105,20 +177,12 @@ CYCLE=$((N * SLOT))
 echo "Loaded $N headline(s) from $INFO_FILE — rotation cycle: ${CYCLE}s"
 
 # Wrap each headline for the side panel.
-# Panel text column is ~280px wide at fontsize 21, so 25 chars/line fits
-# comfortably without clipping.
 for i in "${!RAW_LINES[@]}"; do
     idx=$((i + 1))
     echo "${RAW_LINES[$i]}" | fold -s -w 25 > "$ASSET_DIR/headline${idx}.txt"
 done
 
 # --- figure out how tall the tallest wrapped headline is --------------
-# NOTE: this used to be hardcoded (progress bar/dots/facts at fixed y
-# values), which assumed every headline fit in ~3 lines. Longer
-# headlines can wrap to 5+ lines and ran straight through the progress
-# bar and dots. Compute the real max line count here and derive every
-# element below the headline from it, so nothing overlaps no matter
-# how long the longest headline is.
 HEADLINE_FONTSIZE=21
 HEADLINE_LINE_SPACING=9
 HEADLINE_LINE_H=$((HEADLINE_FONTSIZE + HEADLINE_LINE_SPACING))
@@ -205,19 +269,20 @@ done
 printf 'DID YOU KNOW' > "$ASSET_DIR/fact_label.txt"
 
 #############################################
-# Build the filter_complex dynamically
+# Build the BASE filter chain (everything that
+# does NOT depend on the current video's
+# duration). The CTA / countdown / ticker /
+# border / watermark section is appended later,
+# per-video, in build_final_filter().
 #############################################
+SHADOW="shadowcolor=black@0.6:shadowx=1:shadowy=1"
 
 # --- base video + background art -------------------------------
-# NOTE: vignette + eq removed — too expensive for a 2-core CI runner.
-# NOTE: resolution dropped to 1280x720 — 1080p30 is not realtime-encodable
-# on 2 vCPUs with this filter graph, regardless of preset.
 CHAIN="[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:black[video];"
 CHAIN+="[1:v]scale=1280:720:flags=fast_bilinear[ovl];"
 CHAIN+="[ovl][video]overlay=0:0[base];"
 
 # --- left info panel with feathered (gradient-style) edge -----------------
-# NOTE: scaled to 333px wide (was 500px at 1080p) to match the 1280x720 frame.
 CHAIN+="[base]drawbox=x=0:y=0:w=333:h=720:color=black@0.60:t=fill[p1];"
 CHAIN+="[p1]drawbox=x=333:y=0:w=4:h=720:color=black@0.45:t=fill[p2];"
 CHAIN+="[p2]drawbox=x=337:y=0:w=4:h=720:color=black@0.30:t=fill[p3];"
@@ -229,17 +294,16 @@ CHAIN+="[p5]drawbox=x=345:y=0:w=2:h=720:color=${GOLD}@0.6:t=fill[p6];"
 CHAIN+="[p6]drawbox=x=27:y=28:w=11:h=11:color=${RED}:t=fill:enable='lt(mod(t\,1)\,0.6)'[p7];"
 CHAIN+="[p7]drawtext=fontfile=${FONT}:text='LIVE':fontcolor=white:fontsize=30:x=44:y=19[p8];"
 
-# --- credits + live UTC clock ----------------------------------------------
-# NOTE: was x=w-text_w-20, which right-aligns to the full 1280px frame —
-# that put this text floating over the video, outside the 333px panel.
-# Right-align to the panel's own right edge (313) instead, so it sits
-# under/beside the LIVE badge, inside the panel.
+# --- credits + live UTC clock + subscriber count + viewer count -----------
+# Right-aligned to the panel's own right edge (313), stacked vertically.
 CHAIN+="[p8]drawtext=fontfile=${FONT}:text='Credits\: NASA':fontcolor=white@0.85:fontsize=15:x=313-text_w:y=19[p9];"
 CHAIN+="[p9]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/clock.txt:reload=1:fontcolor=${GOLD}:fontsize=14:x=313-text_w:y=39[p10];"
+CHAIN+="[p10]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/subs.txt:reload=1:fontcolor=white@0.75:fontsize=13:x=313-text_w:y=57[p10b];"
+CHAIN+="[p10b]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/viewers.txt:reload=1:fontcolor=white@0.75:fontsize=13:x=313-text_w:y=75[p10c];"
 
-# --- titles ------------------------------------------------------------
-CHAIN+="[p10]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/title1.txt:fontcolor=white:fontsize=23:x=33:y=83[p11];"
-CHAIN+="[p11]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/title2.txt:fontcolor=white@0.85:fontsize=17:x=33:y=112[p12];"
+# --- titles (with subtle drop shadow) --------------------------------------
+CHAIN+="[p10c]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/title1.txt:fontcolor=white:fontsize=23:x=33:y=83:${SHADOW}[p11];"
+CHAIN+="[p11]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/title2.txt:fontcolor=white@0.85:fontsize=17:x=33:y=112:${SHADOW}[p12];"
 CHAIN+="[p12]drawbox=x=33:y=143:w=280:h=2:color=white@0.3:t=fill[p13];"
 
 # --- section header ----------------------------------------------------
@@ -247,9 +311,6 @@ CHAIN+="[p13]drawbox=x=33:y=159:w=8:h=8:color=${GOLD}:t=fill[p14];"
 CHAIN+="[p14]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/header.txt:fontcolor=${GOLD}:fontsize=15:x=49:y=156[p15];"
 
 # --- eyebrow category tag above the rotating headline -----------------
-# NOTE: moved from y=187 -> y=198 (+11px) for extra clearance below the
-# gold section-header dot/line (y=143 divider, y=159 dot), since it was
-# overlapping. Headline block below is nudged down to match.
 CHAIN+="[p15]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/eyebrow.txt:fontcolor=${GOLD}@0.85:fontsize=12:x=33:y=198[p16];"
 
 prev="p16"
@@ -259,20 +320,16 @@ for i in "${!RAW_LINES[@]}"; do
     end=$((start + SLOT))
     nxt="h${idx}"
     ALPHA="if(between(mod(t\,${CYCLE})\,${start}\,${end})\,if(lt(mod(t\,${CYCLE})-${start}\,0.6)\,(mod(t\,${CYCLE})-${start})/0.6\,if(gt(mod(t\,${CYCLE})-${start}\,${SLOT}-0.6)\,(${end}-mod(t\,${CYCLE}))/0.6\,1))\,0)"
-    CHAIN+="[${prev}]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/headline${idx}.txt:fontcolor=white:fontsize=${HEADLINE_FONTSIZE}:line_spacing=${HEADLINE_LINE_SPACING}:x=33:y=${HEADLINE_Y}:alpha='${ALPHA}'[${nxt}];"
+    CHAIN+="[${prev}]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/headline${idx}.txt:fontcolor=white:fontsize=${HEADLINE_FONTSIZE}:line_spacing=${HEADLINE_LINE_SPACING}:x=33:y=${HEADLINE_Y}:alpha='${ALPHA}':${SHADOW}[${nxt}];"
     prev="$nxt"
 done
 
-# --- animated progress bar: fills across current headline's time slot -----
-# NOTE: y is now derived from MAX_HEADLINE_LINES so it always clears the
-# tallest wrapped headline, regardless of headline length.
+# --- animated progress bar -----------------
 CHAIN+="[${prev}]drawbox=x=33:y=${PROGRESS_Y}:w=280:h=2:color=white@0.15:t=fill[pg1];"
 CHAIN+="[pg1]drawbox=x=33:y=${PROGRESS_Y}:w='280*(mod(t\,${SLOT}))/${SLOT}':h=2:color=${GOLD}:t=fill[pg2];"
 prev="pg2"
 
 # --- background dots (dim) -------------------------------------------------
-# NOTE: y is now derived (DOTS_Y), always 20px below the progress bar,
-# which itself sits below the tallest possible headline.
 for i in "${!RAW_LINES[@]}"; do
     idx=$((i + 1))
     x=$((33 + i * 17))
@@ -299,9 +356,7 @@ for i in "${!RAW_LINES[@]}"; do
     fi
 done
 
-# --- rotating fun fact (fills empty space, adds periodic motion) ----------
-# NOTE: whole fact block position is derived (FACT_DIVIDER_Y / FACT_LABEL_Y),
-# always positioned relative to the dots row above it.
+# --- rotating fun fact ----------
 CHAIN+="[${prev}]drawbox=x=33:y=${FACT_DIVIDER_Y}:w=280:h=2:color=${GOLD}@0.4:t=fill[fp1];"
 CHAIN+="[fp1]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/fact_label.txt:fontcolor=${GOLD}@0.85:fontsize=12:x=33:y=${FACT_LABEL_Y}[fp2];"
 prev="fp2"
@@ -315,34 +370,58 @@ for i in "${!FACTS[@]}"; do
     prev="$nxt"
 done
 
-prev="$prev"
+BASE_CHAIN="$CHAIN"
+FACT_END="$prev"
 
-# --- periodic subscribe CTA (fades in every 4 min for 8s) -----------------
-CTA_CYCLE=240   # total cycle length in seconds
-CTA_SHOW=8      # how long the CTA stays visible per cycle
-CTA_START=0
-CTA_END=$CTA_SHOW
-CTA_ALPHA="if(between(mod(t\,${CTA_CYCLE})\,${CTA_START}\,${CTA_END})\,if(lt(mod(t\,${CTA_CYCLE})-${CTA_START}\,0.6)\,(mod(t\,${CTA_CYCLE})-${CTA_START})/0.6\,if(gt(mod(t\,${CTA_CYCLE})-${CTA_START}\,${CTA_SHOW}-0.6)\,(${CTA_END}-mod(t\,${CTA_CYCLE}))/0.6\,1))\,0)"
-CTA_ENABLE="between(mod(t\,${CTA_CYCLE})\,${CTA_START}\,${CTA_END})"
 printf 'SUBSCRIBE for daily space discoveries' > "$ASSET_DIR/cta.txt"
-CHAIN+="[${prev}]drawbox=x=733:y=620:w=507:h=43:color=black@0.75:t=fill:enable='${CTA_ENABLE}'[cta1];"
-CHAIN+="[cta1]drawbox=x=733:y=620:w=4:h=43:color=${GOLD}:t=fill:enable='${CTA_ENABLE}'[cta2];"
-CHAIN+="[cta2]drawbox=x=755:y=636:w=11:h=11:color=${RED}:t=fill:enable='${CTA_ENABLE}'[cta3];"
-CHAIN+="[cta3]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/cta.txt:fontcolor=white:fontsize=19:x=773:y=633:alpha='${CTA_ALPHA}'[cta4];"
-prev="cta4"
 
-# --- bottom ticker bar -------------------------------------------------
-CHAIN+="[${prev}]drawbox=x=0:y=680:w=1280:h=40:color=black@0.72:t=fill[tk1];"
-CHAIN+="[tk1]drawbox=x=0:y=680:w=1280:h=2:color=${GOLD}@0.9:t=fill[tk2];"
-CHAIN+="[tk2]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/ticker.txt:fontcolor=white:fontsize=17:borderw=2:bordercolor=black@0.6:y=695:x='w-mod(t*${TICKER_SPEED}\,text_w+w)'[tk3];"
-CHAIN+="[tk3]drawbox=x=0:y=680:w=120:h=40:color=black@0.85:t=fill[tk4];"
-CHAIN+="[tk4]drawbox=x=0:y=682:w=113:h=38:color=${GOLD}:t=fill[tk5];"
-CHAIN+="[tk5]drawtext=fontfile=${FONT}:text='BULLETIN':fontcolor=black:fontsize=16:x=17:y=695[tk6];"
+#############################################
+# build_final_filter: appends the CTA / next-
+# video countdown / ticker / watermark / border
+# section onto BASE_CHAIN. Called fresh for each
+# video since the countdown depends on that
+# video's probed duration.
+#############################################
+build_final_filter() {
+    local total_duration="$1"
+    local tail="$BASE_CHAIN"
 
-# --- outer frame border -------------------------------------------------
-CHAIN+="[tk6]drawbox=x=0:y=0:w=1280:h=720:color=black@0.5:t=2[final]"
+    # --- CTA box: alternates between "SUBSCRIBE" (8s every 4 min) and a
+    # live "Next video in Xs" countdown the rest of the time. -----------
+    local CTA_CYCLE=240
+    local CTA_SHOW=8
+    local CTA_ALPHA="if(between(mod(t\,${CTA_CYCLE})\,0\,${CTA_SHOW})\,if(lt(mod(t\,${CTA_CYCLE})\,0.6)\,mod(t\,${CTA_CYCLE})/0.6\,if(gt(mod(t\,${CTA_CYCLE})\,${CTA_SHOW}-0.6)\,(${CTA_SHOW}-mod(t\,${CTA_CYCLE}))/0.6\,1))\,0)"
+    local CTA_ENABLE="between(mod(t\,${CTA_CYCLE})\,0\,${CTA_SHOW})"
+    local COUNTDOWN_ENABLE="not(${CTA_ENABLE})"
 
-FILTER="$CHAIN"
+    tail+="[${FACT_END}]drawbox=x=733:y=620:w=507:h=43:color=black@0.75:t=fill[cta_bg];"
+    tail+="[cta_bg]drawbox=x=733:y=620:w=4:h=43:color=${GOLD}:t=fill[cta_bar];"
+    tail+="[cta_bar]drawbox=x=755:y=636:w=11:h=11:color=${RED}:t=fill:enable='${CTA_ENABLE}'[cta_dot];"
+    tail+="[cta_dot]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/cta.txt:fontcolor=white:fontsize=19:x=773:y=633:alpha='${CTA_ALPHA}'[cta_sub];"
+
+    if [[ "$total_duration" =~ ^[0-9]+$ ]] && [ "$total_duration" -gt 0 ]; then
+        tail+="[cta_sub]drawtext=fontfile=${FONT}:text='Next video in %{eif\:max(${total_duration}-t\,0)\:d}s':fontcolor=white:fontsize=19:x=773:y=633:enable='${COUNTDOWN_ENABLE}'[cta_final];"
+    else
+        # Duration unknown (e.g. ffprobe couldn't read it) — generic filler.
+        tail+="[cta_sub]drawtext=fontfile=${FONT}:text='Coming up next...':fontcolor=white@0.85:fontsize=19:x=773:y=633:enable='${COUNTDOWN_ENABLE}'[cta_final];"
+    fi
+
+    # --- bottom ticker bar -------------------------------------------------
+    tail+="[cta_final]drawbox=x=0:y=680:w=1280:h=40:color=black@0.72:t=fill[tk1];"
+    tail+="[tk1]drawbox=x=0:y=680:w=1280:h=2:color=${GOLD}@0.9:t=fill[tk2];"
+    tail+="[tk2]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/ticker.txt:fontcolor=white:fontsize=17:borderw=2:bordercolor=black@0.6:y=695:x='w-mod(t*${TICKER_SPEED}\,text_w+w)'[tk3];"
+    tail+="[tk3]drawbox=x=0:y=680:w=120:h=40:color=black@0.85:t=fill[tk4];"
+    tail+="[tk4]drawbox=x=0:y=682:w=113:h=38:color=${GOLD}:t=fill[tk5];"
+    tail+="[tk5]drawtext=fontfile=${FONT}:text='BULLETIN':fontcolor=black:fontsize=16:x=17:y=695[tk6];"
+
+    # --- watermark: channel name, low-opacity, bottom-right ---------------
+    tail+="[tk6]drawtext=fontfile=${FONT}:text='${CHANNEL_NAME}':fontcolor=white@0.35:fontsize=15:x=1260-text_w:y=655[wm1];"
+
+    # --- outer frame border -------------------------------------------------
+    tail+="[wm1]drawbox=x=0:y=0:w=1280:h=720:color=black@0.5:t=2[final]"
+
+    echo "$tail"
+}
 
 #############################################
 # Up-next bumper: short branded title card
@@ -352,7 +431,6 @@ FILTER="$CHAIN"
 run_bumper() {
     local next_url="$1"
 
-    # Try to derive a readable title from the filename; fall back to generic.
     local raw title
     raw="${next_url##*/}"
     raw="${raw%.*}"
@@ -383,9 +461,10 @@ run_bumper() {
     BFILTER+="[b2]drawtext=fontfile=${FONT}:text='LIVE':fontcolor=white:fontsize=30:x=44:y=19[b3];"
     BFILTER+="[b3]drawbox=x=0:y=313:w=1280:h=2:color=${GOLD}@0.8:t=fill[b4];"
     BFILTER+="[b4]drawtext=fontfile=${FONT}:text='UP NEXT':fontcolor=${GOLD}:fontsize=22:x=(w-text_w)/2:y=260[b5];"
-    BFILTER+="[b5]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/bumper_title.txt:fontcolor=white:fontsize=36:line_spacing=8:x=(w-text_w)/2:y=347[b6];"
+    BFILTER+="[b5]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/bumper_title.txt:fontcolor=white:fontsize=36:line_spacing=8:x=(w-text_w)/2:y=347:${SHADOW}[b6];"
     BFILTER+="[b6]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/bumper_sub.txt:fontcolor=white@0.75:fontsize=18:x=(w-text_w)/2:y=427[b7];"
-    BFILTER+="[b7]fade=t=in:st=0:d=0.5,fade=t=out:st=${fade_out_start}:d=0.6[final]"
+    BFILTER+="[b7]drawtext=fontfile=${FONT}:text='${CHANNEL_NAME}':fontcolor=white@0.4:fontsize=14:x=(w-text_w)/2:y=470[b8];"
+    BFILTER+="[b8]fade=t=in:st=0:d=0.5,fade=t=out:st=${fade_out_start}:d=0.6[final]"
 
     ffmpeg \
     -hide_banner \
@@ -427,6 +506,22 @@ run_video() {
     local url="$1"
     local attempt=1
 
+    # Probe actual duration so the CTA box can show a real countdown to
+    # the next video. Falls back gracefully if probing fails (e.g. some
+    # live/streamed sources report no duration).
+    local duration
+    duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$url" 2>/dev/null || echo "")
+    duration=${duration%.*}
+    [[ "$duration" =~ ^[0-9]+$ ]] || duration=""
+    if [ -n "$duration" ]; then
+        echo "Probed duration: ${duration}s"
+    else
+        echo "Could not probe duration — countdown will show generic filler text."
+    fi
+
+    local filter
+    filter=$(build_final_filter "$duration")
+
     while [ "$attempt" -le "$MAX_RETRIES" ]; do
         echo "----------------------------------------"
         echo "Streaming (attempt ${attempt}/${MAX_RETRIES}):"
@@ -440,7 +535,7 @@ run_video() {
         -re \
         -i "$url" \
         -loop 1 -i overlay.png \
-        -filter_complex "$FILTER" \
+        -filter_complex "$filter" \
         -map "[final]" \
         -map 0:a? \
         -r 30 \
@@ -491,8 +586,6 @@ run_video() {
 IFS=',' read -ra RAW_URLS <<< "$VIDEO_URL"
 URLS=()
 for u in "${RAW_URLS[@]}"; do
-    # trim leading/trailing whitespace so "url1, url2" doesn't leave
-    # a leading space that breaks ffmpeg's "-i <url>" input.
     u="${u#"${u%%[![:space:]]*}"}"
     u="${u%"${u##*[![:space:]]}"}"
     [ -n "$u" ] && URLS+=("$u")
