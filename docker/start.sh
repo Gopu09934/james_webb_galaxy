@@ -82,6 +82,7 @@ printf ' ' > "$ASSET_DIR/subs.txt"
 SUBS_PID=""
 if [ "$SHOW_STATS" = true ]; then
     (
+        WARNED_ONCE=false
         while true; do
             RESP=$(curl -s "https://www.googleapis.com/youtube/v3/channels?part=statistics&id=${YOUTUBE_CHANNEL_ID}&key=${YOUTUBE_API_KEY}" || true)
             COUNT=$(echo "$RESP" | grep -o '"subscriberCount"[^"]*"[0-9]*"' | grep -o '[0-9]*$')
@@ -89,6 +90,14 @@ if [ "$SHOW_STATS" = true ]; then
                 FORMATTED=$(printf "%'d" "$COUNT" 2>/dev/null || echo "$COUNT")
                 printf '%s subscribers' "$FORMATTED" > "$ASSET_DIR/subs.txt.tmp"
                 mv -f "$ASSET_DIR/subs.txt.tmp" "$ASSET_DIR/subs.txt"
+                WARNED_ONCE=false
+            elif [ "$WARNED_ONCE" = false ]; then
+                # Log the raw response once so it shows up in the Actions
+                # log — this tells us exactly why the count isn't parsing
+                # (bad channel ID, disabled API, quota, key restrictions, etc.)
+                echo "WARNING: could not parse subscriberCount from API response. Raw response:"
+                echo "$RESP"
+                WARNED_ONCE=true
             fi
             sleep 60
         done
@@ -194,7 +203,7 @@ for i in "${!RAW_LINES[@]}"; do
 done
 echo "Longest headline wraps to $MAX_HEADLINE_LINES line(s)."
 
-HEADLINE_Y=218
+HEADLINE_Y=230
 PROGRESS_Y=$((HEADLINE_Y + MAX_HEADLINE_LINES * HEADLINE_LINE_H + 12))
 DOTS_Y=$((PROGRESS_Y + 20))
 FACT_DIVIDER_Y=$((DOTS_Y + 40))
@@ -302,16 +311,18 @@ CHAIN+="[p10]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/subs.txt:reload=1:f
 CHAIN+="[p10b]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/viewers.txt:reload=1:fontcolor=white@0.75:fontsize=13:x=313-text_w:y=75[p10c];"
 
 # --- titles (with subtle drop shadow) --------------------------------------
-CHAIN+="[p10c]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/title1.txt:fontcolor=white:fontsize=23:x=33:y=83:${SHADOW}[p11];"
-CHAIN+="[p11]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/title2.txt:fontcolor=white@0.85:fontsize=17:x=33:y=112:${SHADOW}[p12];"
-CHAIN+="[p12]drawbox=x=33:y=143:w=280:h=2:color=white@0.3:t=fill[p13];"
+# NOTE: shifted +12px down from the original y=83 baseline to clear the
+# subs/viewers stat lines added above (which end around y=89-91).
+CHAIN+="[p10c]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/title1.txt:fontcolor=white:fontsize=23:x=33:y=95:${SHADOW}[p11];"
+CHAIN+="[p11]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/title2.txt:fontcolor=white@0.85:fontsize=17:x=33:y=124:${SHADOW}[p12];"
+CHAIN+="[p12]drawbox=x=33:y=155:w=280:h=2:color=white@0.3:t=fill[p13];"
 
 # --- section header ----------------------------------------------------
-CHAIN+="[p13]drawbox=x=33:y=159:w=8:h=8:color=${GOLD}:t=fill[p14];"
-CHAIN+="[p14]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/header.txt:fontcolor=${GOLD}:fontsize=15:x=49:y=156[p15];"
+CHAIN+="[p13]drawbox=x=33:y=171:w=8:h=8:color=${GOLD}:t=fill[p14];"
+CHAIN+="[p14]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/header.txt:fontcolor=${GOLD}:fontsize=15:x=49:y=168[p15];"
 
 # --- eyebrow category tag above the rotating headline -----------------
-CHAIN+="[p15]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/eyebrow.txt:fontcolor=${GOLD}@0.85:fontsize=12:x=33:y=198[p16];"
+CHAIN+="[p15]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/eyebrow.txt:fontcolor=${GOLD}@0.85:fontsize=12:x=33:y=210[p16];"
 
 prev="p16"
 for i in "${!RAW_LINES[@]}"; do
