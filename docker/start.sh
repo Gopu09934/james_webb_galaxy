@@ -187,7 +187,7 @@ if [ "${#RAW_LINES[@]}" -eq 0 ]; then
     "The Euclid mission is creating the largest 3D map of the Universe to investigate dark matter and dark energy."
     "The Vera C. Rubin Observatory is expected to transform astronomy with its wide-field survey of the southern sky."
     "Gravitational wave observatories are detecting collisions between black holes and neutron stars across the cosmos."
-    "NASA and international space missions continue expanding our understanding of planets, stars, galaxies, and the evolution of the Universe."
+    "NASA and international space missions continue expanding our understanding of planets, stars, galaxies, and  Universe."
     "Webb is observing protoplanetary disks where new planets are actively forming around young stars."
     "Astronomers continue discovering ancient galaxies that challenge existing models of the early Universe."
     "Every new Webb observation provides valuable insights into the history, evolution, and future of our cosmos."
@@ -291,7 +291,6 @@ if [ "${#FACTS[@]}" -eq 0 ]; then
     "Pulsars are rapidly rotating neutron stars that emit regular beams of radio waves."
     "The Event Horizon Telescope captured the first images of black holes in 2019 and 2022."
     "The search for Earth-like exoplanets is one of the most exciting areas of modern astronomy."
-    "Every new James Webb observation is helping scientists refine our understanding of the origins of stars, galaxies, and planetary systems."
 )
 fi
 FACT_N=${#FACTS[@]}
