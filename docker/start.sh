@@ -37,6 +37,10 @@ SLOT=6            # seconds each headline is shown
 FACT_SLOT=8       # seconds each fun fact is shown
 TICKER_SPEED=110  # pixels/second for the bottom ticker scroll
 CHANNEL_NAME="Technical Talk India"
+SHADOW="shadowcolor=black@0.6:shadowx=1:shadowy=1"
+HEADLINE_FONTSIZE=21
+HEADLINE_LINE_SPACING=9
+HEADLINE_LINE_H=$((HEADLINE_FONTSIZE + HEADLINE_LINE_SPACING))
 
 #############################################
 # Up-next bumper (shown between videos)
@@ -155,27 +159,21 @@ fi
 trap 'kill "$CLOCK_PID" 2>/dev/null || true; [ -n "$SUBS_PID" ] && kill "$SUBS_PID" 2>/dev/null || true; [ -n "$VIEWERS_PID" ] && kill "$VIEWERS_PID" 2>/dev/null || true' EXIT
 
 #############################################
-# Static panel text
+# Static panel text (unchanged across videos)
 #############################################
 printf 'J A M E S   W E B B'              > "$ASSET_DIR/title1.txt"
 printf 'S P A C E   T E L E S C O P E'    > "$ASSET_DIR/title2.txt"
 printf "T O D A Y ' S   D I S C O V E R Y" > "$ASSET_DIR/header.txt"
 printf 'DEEP SPACE REPORT'                > "$ASSET_DIR/eyebrow.txt"
+printf 'SUBSCRIBE for daily space discoveries' > "$ASSET_DIR/cta.txt"
+printf 'DID YOU KNOW' > "$ASSET_DIR/fact_label.txt"
 
 #############################################
-# Load headlines from galaxy_info.txt
-# (still used to build the bottom ticker text)
+# Default headline / fact pools (used as a
+# last resort if galaxy_info.txt / facts.txt
+# are missing or empty)
 #############################################
-RAW_LINES=()
-if [ -f "$INFO_FILE" ]; then
-    while IFS= read -r line; do
-        [ -n "$(echo "$line" | tr -d '[:space:]')" ] && RAW_LINES+=("$line")
-    done < "$INFO_FILE"
-fi
-
-if [ "${#RAW_LINES[@]}" -eq 0 ]; then
-    echo "WARNING: $INFO_FILE not found or empty — using default headlines."
-    RAW_LINES=(
+DEFAULT_HEADLINES=(
     "The James Webb Space Telescope is capturing the deepest infrared views of the early Universe ever recorded."
     "Webb has detected galaxies that formed just a few hundred million years after the Big Bang."
     "Scientists are using Webb to analyze the atmospheres of distant exoplanets with unprecedented precision."
@@ -192,56 +190,8 @@ if [ "${#RAW_LINES[@]}" -eq 0 ]; then
     "Astronomers continue discovering ancient galaxies that challenge existing models of the early Universe."
     "Every new Webb observation provides valuable insights into the history, evolution, and future of our cosmos."
 )
-fi
 
-N=${#RAW_LINES[@]}
-CYCLE=$((N * SLOT))
-echo "Loaded $N headline(s) from $INFO_FILE — rotation cycle: ${CYCLE}s"
-
-# Wrap each headline for the side panel.
-for i in "${!RAW_LINES[@]}"; do
-    idx=$((i + 1))
-    echo "${RAW_LINES[$i]}" | fold -s -w 25 > "$ASSET_DIR/headline${idx}.txt"
-done
-
-# --- figure out how tall the tallest wrapped headline is --------------
-HEADLINE_FONTSIZE=21
-HEADLINE_LINE_SPACING=9
-HEADLINE_LINE_H=$((HEADLINE_FONTSIZE + HEADLINE_LINE_SPACING))
-MAX_HEADLINE_LINES=1
-for i in "${!RAW_LINES[@]}"; do
-    idx=$((i + 1))
-    lines=$(grep -c '' "$ASSET_DIR/headline${idx}.txt")
-    [ "$lines" -gt "$MAX_HEADLINE_LINES" ] && MAX_HEADLINE_LINES=$lines
-done
-echo "Longest headline wraps to $MAX_HEADLINE_LINES line(s)."
-
-HEADLINE_Y=230
-PROGRESS_Y=$((HEADLINE_Y + MAX_HEADLINE_LINES * HEADLINE_LINE_H + 12))
-DOTS_Y=$((PROGRESS_Y + 20))
-FACT_DIVIDER_Y=$((DOTS_Y + 40))
-FACT_LABEL_Y=$((FACT_DIVIDER_Y + 14))
-FACT_TEXT_Y=$((FACT_LABEL_Y + 20))
-
-# Build one long ticker string for the bottom scroll bar
-TICKER_STRING=""
-for i in "${!RAW_LINES[@]}"; do
-    TICKER_STRING+="${RAW_LINES[$i]}     •     "
-done
-printf '%s' "$TICKER_STRING" > "$ASSET_DIR/ticker.txt"
-
-#############################################
-# Fun facts (fills empty space + adds motion)
-# Optional file: facts.txt, one fact per line.
-#############################################
-FACTS=()
-if [ -f "facts.txt" ]; then
-    while IFS= read -r line; do
-        [ -n "$(echo "$line" | tr -d '[:space:]')" ] && FACTS+=("$line")
-    done < "facts.txt"
-fi
-if [ "${#FACTS[@]}" -eq 0 ]; then
-    FACTS=(
+DEFAULT_FACTS=(
     "The Universe is approximately 13.8 billion years old."
     "A light-year is the distance light travels in one year, about 9.46 trillion kilometers."
     "The James Webb Space Telescope observes the Universe primarily in infrared light."
@@ -292,123 +242,198 @@ if [ "${#FACTS[@]}" -eq 0 ]; then
     "The Event Horizon Telescope captured the first images of black holes in 2019 and 2022."
     "The search for Earth-like exoplanets is one of the most exciting areas of modern astronomy."
 )
-fi
-FACT_N=${#FACTS[@]}
-FACT_CYCLE=$((FACT_N * FACT_SLOT))
-for i in "${!FACTS[@]}"; do
-    idx=$((i + 1))
-    echo "${FACTS[$i]}" | fold -s -w 23 > "$ASSET_DIR/fact${idx}.txt"
-done
-printf 'DID YOU KNOW' > "$ASSET_DIR/fact_label.txt"
 
 #############################################
-# Build the BASE filter chain (everything that
-# does NOT depend on the current video's
-# duration). The CTA / countdown / ticker /
-# border / watermark section is appended later,
-# per-video, in build_final_filter().
+# prepare_video_content: (re)loads headlines +
+# facts for the video about to stream, and
+# rebuilds BASE_CHAIN / FACT_END to match.
+#
+# Per-video override: if files named
+#   <basename>.headlines.txt
+#   <basename>.facts.txt
+# exist (basename = video filename without
+# extension — same derivation used for the
+# up-next bumper title), they're used verbatim,
+# in the order given. Useful for curating panel
+# content to match a specific video.
+#
+# Otherwise falls back to the shared pool
+# (galaxy_info.txt / facts.txt / built-in
+# defaults), shuffled into a fresh random order
+# each video so the panel doesn't feel like a
+# static banner repeating identically on every
+# clip.
 #############################################
-SHADOW="shadowcolor=black@0.6:shadowx=1:shadowy=1"
+prepare_video_content() {
+    local url="$1"
+    local base
+    base="${url##*/}"
+    base="${base%.*}"
 
-# --- base video + background art -------------------------------
-CHAIN="[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:black[video];"
-CHAIN+="[1:v]scale=1280:720:flags=fast_bilinear[ovl];"
-CHAIN+="[ovl][video]overlay=0:0[base];"
-
-# --- left info panel with feathered (gradient-style) edge -----------------
-CHAIN+="[base]drawbox=x=0:y=0:w=333:h=720:color=black@0.60:t=fill[p1];"
-CHAIN+="[p1]drawbox=x=333:y=0:w=4:h=720:color=black@0.45:t=fill[p2];"
-CHAIN+="[p2]drawbox=x=337:y=0:w=4:h=720:color=black@0.30:t=fill[p3];"
-CHAIN+="[p3]drawbox=x=341:y=0:w=4:h=720:color=black@0.15:t=fill[p4];"
-CHAIN+="[p4]drawbox=x=0:y=0:w=347:h=4:color=${GOLD}@0.9:t=fill[p5];"
-CHAIN+="[p5]drawbox=x=345:y=0:w=2:h=720:color=${GOLD}@0.6:t=fill[p6];"
-
-# --- LIVE indicator: steady label + blinking dot ---------------------------
-CHAIN+="[p6]drawbox=x=27:y=28:w=11:h=11:color=${RED}:t=fill:enable='lt(mod(t\,1)\,0.6)'[p7];"
-CHAIN+="[p7]drawtext=fontfile=${FONT}:text='LIVE':fontcolor=white:fontsize=30:x=44:y=19[p8];"
-
-# --- credits + live UTC clock + subscriber count + viewer count -----------
-# Right-aligned to the panel's own right edge (313), stacked vertically.
-CHAIN+="[p8]drawtext=fontfile=${FONT}:text='Credits\: NASA':fontcolor=white@0.85:fontsize=15:x=313-text_w:y=19[p9];"
-CHAIN+="[p9]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/clock.txt:reload=1:fontcolor=${GOLD}:fontsize=14:x=313-text_w:y=39[p10];"
-CHAIN+="[p10]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/subs.txt:reload=1:fontcolor=white@0.75:fontsize=13:x=313-text_w:y=57[p10b];"
-CHAIN+="[p10b]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/viewers.txt:reload=1:fontcolor=white@0.75:fontsize=13:x=313-text_w:y=75[p10c];"
-
-# --- titles (with subtle drop shadow) --------------------------------------
-# NOTE: shifted +12px down from the original y=83 baseline to clear the
-# subs/viewers stat lines added above (which end around y=89-91).
-CHAIN+="[p10c]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/title1.txt:fontcolor=white:fontsize=23:x=33:y=95:${SHADOW}[p11];"
-CHAIN+="[p11]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/title2.txt:fontcolor=white@0.85:fontsize=17:x=33:y=124:${SHADOW}[p12];"
-CHAIN+="[p12]drawbox=x=33:y=155:w=280:h=2:color=white@0.3:t=fill[p13];"
-
-# --- section header ----------------------------------------------------
-CHAIN+="[p13]drawbox=x=33:y=171:w=8:h=8:color=${GOLD}:t=fill[p14];"
-CHAIN+="[p14]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/header.txt:fontcolor=${GOLD}:fontsize=15:x=49:y=168[p15];"
-
-# --- eyebrow category tag above the rotating headline -----------------
-CHAIN+="[p15]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/eyebrow.txt:fontcolor=${GOLD}@0.85:fontsize=12:x=33:y=210[p16];"
-
-prev="p16"
-for i in "${!RAW_LINES[@]}"; do
-    idx=$((i + 1))
-    start=$((i * SLOT))
-    end=$((start + SLOT))
-    nxt="h${idx}"
-    ALPHA="if(between(mod(t\,${CYCLE})\,${start}\,${end})\,if(lt(mod(t\,${CYCLE})-${start}\,0.6)\,(mod(t\,${CYCLE})-${start})/0.6\,if(gt(mod(t\,${CYCLE})-${start}\,${SLOT}-0.6)\,(${end}-mod(t\,${CYCLE}))/0.6\,1))\,0)"
-    CHAIN+="[${prev}]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/headline${idx}.txt:fontcolor=white:fontsize=${HEADLINE_FONTSIZE}:line_spacing=${HEADLINE_LINE_SPACING}:x=33:y=${HEADLINE_Y}:alpha='${ALPHA}':${SHADOW}[${nxt}];"
-    prev="$nxt"
-done
-
-# --- animated progress bar -----------------
-CHAIN+="[${prev}]drawbox=x=33:y=${PROGRESS_Y}:w=280:h=2:color=white@0.15:t=fill[pg1];"
-CHAIN+="[pg1]drawbox=x=33:y=${PROGRESS_Y}:w='280*(mod(t\,${SLOT}))/${SLOT}':h=2:color=${GOLD}:t=fill[pg2];"
-prev="pg2"
-
-# --- background dots (dim) -------------------------------------------------
-for i in "${!RAW_LINES[@]}"; do
-    idx=$((i + 1))
-    x=$((33 + i * 17))
-    nxt="db${idx}"
-    CHAIN+="[${prev}]drawbox=x=${x}:y=${DOTS_Y}:w=7:h=7:color=white@0.3:t=fill[${nxt}];"
-    prev="$nxt"
-done
-
-# --- active dot (gold, toggled per slot) -----------------------------------
-last=$((N - 1))
-for i in "${!RAW_LINES[@]}"; do
-    idx=$((i + 1))
-    x=$((33 + i * 17))
-    start=$((i * SLOT))
-    end=$((start + SLOT))
-    ENABLE="between(mod(t\,${CYCLE})\,${start}\,${end})"
-    if [ "$i" -eq "$last" ]; then
-        CHAIN+="[${prev}]drawbox=x=${x}:y=${DOTS_Y}:w=7:h=7:color=${GOLD}:t=fill:enable='${ENABLE}'[pdotend];"
-        prev="pdotend"
-    else
-        nxt="da${idx}"
-        CHAIN+="[${prev}]drawbox=x=${x}:y=${DOTS_Y}:w=7:h=7:color=${GOLD}:t=fill:enable='${ENABLE}'[${nxt}];"
-        prev="$nxt"
+    RAW_LINES=()
+    if [ -f "${base}.headlines.txt" ]; then
+        echo "Using curated headlines: ${base}.headlines.txt"
+        while IFS= read -r line; do
+            [ -n "$(echo "$line" | tr -d '[:space:]')" ] && RAW_LINES+=("$line")
+        done < "${base}.headlines.txt"
     fi
-done
+    if [ "${#RAW_LINES[@]}" -eq 0 ]; then
+        local pool=()
+        if [ -f "$INFO_FILE" ]; then
+            while IFS= read -r line; do
+                [ -n "$(echo "$line" | tr -d '[:space:]')" ] && pool+=("$line")
+            done < "$INFO_FILE"
+        fi
+        [ "${#pool[@]}" -eq 0 ] && pool=("${DEFAULT_HEADLINES[@]}")
+        while IFS= read -r line; do
+            RAW_LINES+=("$line")
+        done < <(printf '%s\n' "${pool[@]}" | shuf)
+    fi
 
-# --- rotating fun fact ----------
-CHAIN+="[${prev}]drawbox=x=33:y=${FACT_DIVIDER_Y}:w=280:h=2:color=${GOLD}@0.4:t=fill[fp1];"
-CHAIN+="[fp1]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/fact_label.txt:fontcolor=${GOLD}@0.85:fontsize=12:x=33:y=${FACT_LABEL_Y}[fp2];"
-prev="fp2"
-for i in "${!FACTS[@]}"; do
-    idx=$((i + 1))
-    start=$((i * FACT_SLOT))
-    end=$((start + FACT_SLOT))
-    nxt="f${idx}"
-    FALPHA="if(between(mod(t\,${FACT_CYCLE})\,${start}\,${end})\,if(lt(mod(t\,${FACT_CYCLE})-${start}\,0.6)\,(mod(t\,${FACT_CYCLE})-${start})/0.6\,if(gt(mod(t\,${FACT_CYCLE})-${start}\,${FACT_SLOT}-0.6)\,(${end}-mod(t\,${FACT_CYCLE}))/0.6\,1))\,0)"
-    CHAIN+="[${prev}]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/fact${idx}.txt:fontcolor=white@0.9:fontsize=16:line_spacing=7:x=33:y=${FACT_TEXT_Y}:alpha='${FALPHA}'[${nxt}];"
-    prev="$nxt"
-done
+    FACTS=()
+    if [ -f "${base}.facts.txt" ]; then
+        echo "Using curated facts: ${base}.facts.txt"
+        while IFS= read -r line; do
+            [ -n "$(echo "$line" | tr -d '[:space:]')" ] && FACTS+=("$line")
+        done < "${base}.facts.txt"
+    fi
+    if [ "${#FACTS[@]}" -eq 0 ]; then
+        local fpool=()
+        if [ -f "facts.txt" ]; then
+            while IFS= read -r line; do
+                [ -n "$(echo "$line" | tr -d '[:space:]')" ] && fpool+=("$line")
+            done < "facts.txt"
+        fi
+        [ "${#fpool[@]}" -eq 0 ] && fpool=("${DEFAULT_FACTS[@]}")
+        while IFS= read -r line; do
+            FACTS+=("$line")
+        done < <(printf '%s\n' "${fpool[@]}" | shuf)
+    fi
 
-BASE_CHAIN="$CHAIN"
-FACT_END="$prev"
+    N=${#RAW_LINES[@]}
+    CYCLE=$((N * SLOT))
+    echo "This video: $N headline(s), rotation cycle ${CYCLE}s"
 
-printf 'SUBSCRIBE for daily space discoveries' > "$ASSET_DIR/cta.txt"
+    for i in "${!RAW_LINES[@]}"; do
+        idx=$((i + 1))
+        echo "${RAW_LINES[$i]}" | fold -s -w 25 > "$ASSET_DIR/headline${idx}.txt"
+    done
+
+    MAX_HEADLINE_LINES=1
+    for i in "${!RAW_LINES[@]}"; do
+        idx=$((i + 1))
+        lines=$(grep -c '' "$ASSET_DIR/headline${idx}.txt")
+        [ "$lines" -gt "$MAX_HEADLINE_LINES" ] && MAX_HEADLINE_LINES=$lines
+    done
+    echo "Longest headline wraps to $MAX_HEADLINE_LINES line(s)."
+
+    HEADLINE_Y=230
+    PROGRESS_Y=$((HEADLINE_Y + MAX_HEADLINE_LINES * HEADLINE_LINE_H + 12))
+    DOTS_Y=$((PROGRESS_Y + 20))
+    FACT_DIVIDER_Y=$((DOTS_Y + 40))
+    FACT_LABEL_Y=$((FACT_DIVIDER_Y + 14))
+    FACT_TEXT_Y=$((FACT_LABEL_Y + 20))
+
+    TICKER_STRING=""
+    for i in "${!RAW_LINES[@]}"; do
+        TICKER_STRING+="${RAW_LINES[$i]}     •     "
+    done
+    printf '%s' "$TICKER_STRING" > "$ASSET_DIR/ticker.txt"
+
+    FACT_N=${#FACTS[@]}
+    FACT_CYCLE=$((FACT_N * FACT_SLOT))
+    for i in "${!FACTS[@]}"; do
+        idx=$((i + 1))
+        echo "${FACTS[$i]}" | fold -s -w 23 > "$ASSET_DIR/fact${idx}.txt"
+    done
+
+    #########################################
+    # Rebuild BASE_CHAIN for this video's content
+    #########################################
+    CHAIN="[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:black[video];"
+    CHAIN+="[1:v]scale=1280:720:flags=fast_bilinear[ovl];"
+    CHAIN+="[ovl][video]overlay=0:0[base];"
+
+    CHAIN+="[base]drawbox=x=0:y=0:w=333:h=720:color=black@0.60:t=fill[p1];"
+    CHAIN+="[p1]drawbox=x=333:y=0:w=4:h=720:color=black@0.45:t=fill[p2];"
+    CHAIN+="[p2]drawbox=x=337:y=0:w=4:h=720:color=black@0.30:t=fill[p3];"
+    CHAIN+="[p3]drawbox=x=341:y=0:w=4:h=720:color=black@0.15:t=fill[p4];"
+    CHAIN+="[p4]drawbox=x=0:y=0:w=347:h=4:color=${GOLD}@0.9:t=fill[p5];"
+    CHAIN+="[p5]drawbox=x=345:y=0:w=2:h=720:color=${GOLD}@0.6:t=fill[p6];"
+
+    CHAIN+="[p6]drawbox=x=27:y=28:w=11:h=11:color=${RED}:t=fill:enable='lt(mod(t\,1)\,0.6)'[p7];"
+    CHAIN+="[p7]drawtext=fontfile=${FONT}:text='LIVE':fontcolor=white:fontsize=30:x=44:y=19[p8];"
+
+    CHAIN+="[p8]drawtext=fontfile=${FONT}:text='Credits\: NASA':fontcolor=white@0.85:fontsize=15:x=313-text_w:y=19[p9];"
+    CHAIN+="[p9]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/clock.txt:reload=1:fontcolor=${GOLD}:fontsize=14:x=313-text_w:y=39[p10];"
+    CHAIN+="[p10]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/subs.txt:reload=1:fontcolor=white@0.75:fontsize=13:x=313-text_w:y=57[p10b];"
+    CHAIN+="[p10b]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/viewers.txt:reload=1:fontcolor=white@0.75:fontsize=13:x=313-text_w:y=75[p10c];"
+
+    CHAIN+="[p10c]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/title1.txt:fontcolor=white:fontsize=23:x=33:y=95:${SHADOW}[p11];"
+    CHAIN+="[p11]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/title2.txt:fontcolor=white@0.85:fontsize=17:x=33:y=124:${SHADOW}[p12];"
+    CHAIN+="[p12]drawbox=x=33:y=155:w=280:h=2:color=white@0.3:t=fill[p13];"
+
+    CHAIN+="[p13]drawbox=x=33:y=171:w=8:h=8:color=${GOLD}:t=fill[p14];"
+    CHAIN+="[p14]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/header.txt:fontcolor=${GOLD}:fontsize=15:x=49:y=168[p15];"
+
+    CHAIN+="[p15]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/eyebrow.txt:fontcolor=${GOLD}@0.85:fontsize=12:x=33:y=210[p16];"
+
+    local prev="p16"
+    for i in "${!RAW_LINES[@]}"; do
+        idx=$((i + 1))
+        local start=$((i * SLOT))
+        local end=$((start + SLOT))
+        local nxt="h${idx}"
+        local ALPHA="if(between(mod(t\,${CYCLE})\,${start}\,${end})\,if(lt(mod(t\,${CYCLE})-${start}\,0.6)\,(mod(t\,${CYCLE})-${start})/0.6\,if(gt(mod(t\,${CYCLE})-${start}\,${SLOT}-0.6)\,(${end}-mod(t\,${CYCLE}))/0.6\,1))\,0)"
+        CHAIN+="[${prev}]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/headline${idx}.txt:fontcolor=white:fontsize=${HEADLINE_FONTSIZE}:line_spacing=${HEADLINE_LINE_SPACING}:x=33:y=${HEADLINE_Y}:alpha='${ALPHA}':${SHADOW}[${nxt}];"
+        prev="$nxt"
+    done
+
+    CHAIN+="[${prev}]drawbox=x=33:y=${PROGRESS_Y}:w=280:h=2:color=white@0.15:t=fill[pg1];"
+    CHAIN+="[pg1]drawbox=x=33:y=${PROGRESS_Y}:w='280*(mod(t\,${SLOT}))/${SLOT}':h=2:color=${GOLD}:t=fill[pg2];"
+    prev="pg2"
+
+    for i in "${!RAW_LINES[@]}"; do
+        idx=$((i + 1))
+        local x=$((33 + i * 17))
+        local nxt="db${idx}"
+        CHAIN+="[${prev}]drawbox=x=${x}:y=${DOTS_Y}:w=7:h=7:color=white@0.3:t=fill[${nxt}];"
+        prev="$nxt"
+    done
+
+    local last=$((N - 1))
+    for i in "${!RAW_LINES[@]}"; do
+        idx=$((i + 1))
+        local x=$((33 + i * 17))
+        local start=$((i * SLOT))
+        local end=$((start + SLOT))
+        local ENABLE="between(mod(t\,${CYCLE})\,${start}\,${end})"
+        if [ "$i" -eq "$last" ]; then
+            CHAIN+="[${prev}]drawbox=x=${x}:y=${DOTS_Y}:w=7:h=7:color=${GOLD}:t=fill:enable='${ENABLE}'[pdotend];"
+            prev="pdotend"
+        else
+            local nxt="da${idx}"
+            CHAIN+="[${prev}]drawbox=x=${x}:y=${DOTS_Y}:w=7:h=7:color=${GOLD}:t=fill:enable='${ENABLE}'[${nxt}];"
+            prev="$nxt"
+        fi
+    done
+
+    CHAIN+="[${prev}]drawbox=x=33:y=${FACT_DIVIDER_Y}:w=280:h=2:color=${GOLD}@0.4:t=fill[fp1];"
+    CHAIN+="[fp1]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/fact_label.txt:fontcolor=${GOLD}@0.85:fontsize=12:x=33:y=${FACT_LABEL_Y}[fp2];"
+    prev="fp2"
+    for i in "${!FACTS[@]}"; do
+        idx=$((i + 1))
+        local start=$((i * FACT_SLOT))
+        local end=$((start + FACT_SLOT))
+        local nxt="f${idx}"
+        local FALPHA="if(between(mod(t\,${FACT_CYCLE})\,${start}\,${end})\,if(lt(mod(t\,${FACT_CYCLE})-${start}\,0.6)\,(mod(t\,${FACT_CYCLE})-${start})/0.6\,if(gt(mod(t\,${FACT_CYCLE})-${start}\,${FACT_SLOT}-0.6)\,(${end}-mod(t\,${FACT_CYCLE}))/0.6\,1))\,0)"
+        CHAIN+="[${prev}]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/fact${idx}.txt:fontcolor=white@0.9:fontsize=16:line_spacing=7:x=33:y=${FACT_TEXT_Y}:alpha='${FALPHA}'[${nxt}];"
+        prev="$nxt"
+    done
+
+    BASE_CHAIN="$CHAIN"
+    FACT_END="$prev"
+}
 
 #############################################
 # build_final_filter: appends the CTA / next-
@@ -421,8 +446,6 @@ build_final_filter() {
     local total_duration="$1"
     local tail="$BASE_CHAIN"
 
-    # --- CTA box: alternates between "SUBSCRIBE" (8s every 4 min) and a
-    # live "Next video in Xs" countdown the rest of the time. -----------
     local CTA_CYCLE=240
     local CTA_SHOW=8
     local CTA_ALPHA="if(between(mod(t\,${CTA_CYCLE})\,0\,${CTA_SHOW})\,if(lt(mod(t\,${CTA_CYCLE})\,0.6)\,mod(t\,${CTA_CYCLE})/0.6\,if(gt(mod(t\,${CTA_CYCLE})\,${CTA_SHOW}-0.6)\,(${CTA_SHOW}-mod(t\,${CTA_CYCLE}))/0.6\,1))\,0)"
@@ -437,11 +460,9 @@ build_final_filter() {
     if [[ "$total_duration" =~ ^[0-9]+$ ]] && [ "$total_duration" -gt 0 ]; then
         tail+="[cta_sub]drawtext=fontfile=${FONT}:text='Next video in %{eif\:max(${total_duration}-t\,0)\:d}s':fontcolor=white:fontsize=19:x=773:y=633:enable='${COUNTDOWN_ENABLE}'[cta_final];"
     else
-        # Duration unknown (e.g. ffprobe couldn't read it) — generic filler.
         tail+="[cta_sub]drawtext=fontfile=${FONT}:text='Coming up next...':fontcolor=white@0.85:fontsize=19:x=773:y=633:enable='${COUNTDOWN_ENABLE}'[cta_final];"
     fi
 
-    # --- bottom ticker bar -------------------------------------------------
     tail+="[cta_final]drawbox=x=0:y=680:w=1280:h=40:color=black@0.72:t=fill[tk1];"
     tail+="[tk1]drawbox=x=0:y=680:w=1280:h=2:color=${GOLD}@0.9:t=fill[tk2];"
     tail+="[tk2]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/ticker.txt:fontcolor=white:fontsize=17:borderw=2:bordercolor=black@0.6:y=695:x='w-mod(t*${TICKER_SPEED}\,text_w+w)'[tk3];"
@@ -449,12 +470,8 @@ build_final_filter() {
     tail+="[tk4]drawbox=x=0:y=682:w=113:h=38:color=${GOLD}:t=fill[tk5];"
     tail+="[tk5]drawtext=fontfile=${FONT}:text='BULLETIN':fontcolor=black:fontsize=16:x=17:y=695[tk6];"
 
-    # --- watermark: channel name, low-opacity, bottom-left ---------------
-    # NOTE: bordered like the ticker text — plain translucent text was
-    # disappearing against bright/light parts of the video underneath it.
     tail+="[tk6]drawtext=fontfile=${FONT}:text='${CHANNEL_NAME}':fontcolor=white@0.45:fontsize=15:borderw=1.5:bordercolor=black@0.7:x=353:y=655[wm1];"
 
-    # --- outer frame border -------------------------------------------------
     tail+="[wm1]drawbox=x=0:y=0:w=1280:h=720:color=black@0.5:t=2[final]"
 
     echo "$tail"
@@ -543,9 +560,13 @@ run_video() {
     local url="$1"
     local attempt=1
 
+    # Load headlines/facts tied to this specific video (curated file if
+    # present, otherwise a freshly shuffled pool) and rebuild the panel
+    # filter chain to match.
+    prepare_video_content "$url"
+
     # Probe actual duration so the CTA box can show a real countdown to
-    # the next video. Falls back gracefully if probing fails (e.g. some
-    # live/streamed sources report no duration).
+    # the next video. Falls back gracefully if probing fails.
     local duration
     duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$url" 2>/dev/null || echo "")
     duration=${duration%.*}
@@ -632,6 +653,18 @@ if [ "$NUM_URLS" -eq 0 ]; then
     echo "ERROR: VIDEO_URL contained no valid entries after parsing"
     exit 1
 fi
+
+# Shuffle playback order fresh for every workflow run, so the sequence
+# of videos isn't identical every time the 5-hour cron restarts the
+# container. (Fisher-Yates via `shuf`, always available on Ubuntu.)
+if [ "$NUM_URLS" -gt 1 ]; then
+    mapfile -t URLS < <(printf '%s\n' "${URLS[@]}" | shuf)
+    echo "Shuffled playback order for this run:"
+    for u in "${URLS[@]}"; do
+        echo "  - $u"
+    done
+fi
+
 while true; do
     for ((i = 0; i < NUM_URLS; i++)); do
         url="${URLS[$i]}"
