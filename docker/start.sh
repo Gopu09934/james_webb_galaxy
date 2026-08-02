@@ -187,7 +187,7 @@ if [ "${#RAW_LINES[@]}" -eq 0 ]; then
     "The Euclid mission is creating the largest 3D map of the Universe to investigate dark matter and dark energy."
     "The Vera C. Rubin Observatory is expected to transform astronomy with its wide-field survey of the southern sky."
     "Gravitational wave observatories are detecting collisions between black holes and neutron stars across the cosmos."
-    "NASA and international space missions continue expanding our understanding of planets, stars, galaxies, and  Universe."
+    "NASA and international space missions continue expanding our understanding of planets, stars, galaxies, and Universe."
     "Webb is observing protoplanetary disks where new planets are actively forming around young stars."
     "Astronomers continue discovering ancient galaxies that challenge existing models of the early Universe."
     "Every new Webb observation provides valuable insights into the history, evolution, and future of our cosmos."
