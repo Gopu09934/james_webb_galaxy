@@ -69,6 +69,31 @@ RETRY_DELAY=5        # seconds between retries
 mkdir -p "$ASSET_DIR"
 
 #############################################
+# Generate the coordinate-label marker dot once
+# at startup: a small transparent PNG with a
+# gold-filled center and white ring, matching
+# the panel's gold accent color. Used by
+# build_labels_chain() as ffmpeg input index 2.
+# Always generated (cheap, one frame, 20x20) —
+# harmless/unused by ffmpeg on videos that don't
+# have a matching .labels.txt file.
+#############################################
+DOT_MARKER="dot_marker.png"
+GOLD_R=232; GOLD_G=163; GOLD_B=61
+DOT_VF="format=rgba,geq=r=(if(lte(hypot(X-10\,Y-10)\,5)\,${GOLD_R}\,if(lte(hypot(X-10\,Y-10)\,8)\,255\,0))):g=(if(lte(hypot(X-10\,Y-10)\,5)\,${GOLD_G}\,if(lte(hypot(X-10\,Y-10)\,8)\,255\,0))):b=(if(lte(hypot(X-10\,Y-10)\,5)\,${GOLD_B}\,if(lte(hypot(X-10\,Y-10)\,8)\,255\,0))):a=(if(lte(hypot(X-10\,Y-10)\,8)\,255\,0))"
+ffmpeg -y -f lavfi -i "color=c=black@0.0:s=20x20" -vf "$DOT_VF" -frames:v 1 "$DOT_MARKER" -loglevel error
+if [ ! -s "$DOT_MARKER" ]; then
+    # Guarantee the file always exists and is a valid PNG, even in the
+    # unlikely case the geq-based generation above fails — this is what
+    # gets passed to ffmpeg as a real input on every stream start, so it
+    # must never be missing. Falls back to an invisible 1x1 transparent
+    # pixel (labels would render without a visible dot, but the stream
+    # itself keeps running instead of crashing on a missing input file).
+    echo "WARNING: geq-based marker generation failed — using a blank 1x1 fallback."
+    echo "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" | base64 -d > "$DOT_MARKER"
+fi
+
+#############################################
 # Background clock writer (avoids fragile
 # drawtext %{gmtime} expansion syntax)
 #############################################
@@ -244,6 +269,151 @@ DEFAULT_FACTS=(
 )
 
 #############################################
+# build_labels_chain: optional feature — draws
+# pointer/callout labels onto specific
+# coordinates in the video, similar to
+# hand-annotated documentary footage. Fully
+# optional per video: only activates if a file
+# named <basename>.labels.txt exists.
+#
+# File format — one label per line, comma
+# separated:
+#   x,y,Label text here
+# where x,y is the pixel position on the
+# 1280x720 output frame that the label should
+# point at. Box placement, connector line, and
+# edge-avoidance (flips below/left near frame
+# edges) are computed automatically.
+#
+# Visual style matches the rest of the panel:
+# gold-ring/white marker dot (uses the
+# pre-rendered dot_marker.png), gold-tinted
+# connector line, and a label box with a gold
+# accent bar + thin gold outline (same language
+# as the CTA box).
+#
+# Notes/limits:
+#  - Keep label text under ~28 characters — the
+#    box is a fixed width and does not
+#    reflow/resize to fit longer text.
+#  - Best used for points with x > ~370 so
+#    labels don't collide with the left info
+#    panel.
+#  - The connector is a right-angle line
+#    (vertical then horizontal), not a true
+#    diagonal — ffmpeg has no native diagonal
+#    line primitive without much heavier
+#    filters, so this is the practical choice.
+#  - Requires dot_marker.png (generated once at
+#    startup) to be wired in as ffmpeg input
+#    index 2 — see run_video()'s -i list.
+#
+# Sets globals: LABELS_CHAIN (filter string to
+# append), LABELS_OUT (bracketed output label
+# to continue the chain from, e.g. "[base]" if
+# no labels file exists, or the last label's
+# output node otherwise).
+#############################################
+build_labels_chain() {
+    local url="$1"
+    local base
+    base="${url##*/}"
+    base="${base%.*}"
+
+    LABELS_CHAIN=""
+    LABELS_OUT="[base]"
+
+    local labels_file="${base}.labels.txt"
+    if [ ! -f "$labels_file" ]; then
+        return 0
+    fi
+
+    # First pass: collect valid lines so we know the count up front
+    # (needed to size the marker `split` filter correctly).
+    local xs=() ys=() texts=()
+    while IFS=',' read -r x y text; do
+        x="$(echo "$x" | tr -d '[:space:]')"
+        y="$(echo "$y" | tr -d '[:space:]')"
+        text="$(echo "$text" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+        [[ "$x" =~ ^[0-9]+$ ]] || continue
+        [[ "$y" =~ ^[0-9]+$ ]] || continue
+        [ -z "$text" ] && continue
+        xs+=("$x"); ys+=("$y"); texts+=("$text")
+    done < "$labels_file"
+
+    local n=${#xs[@]}
+    if [ "$n" -eq 0 ]; then
+        echo "NOTICE: $labels_file had no valid lines — skipping labels for this video."
+        return 0
+    fi
+    echo "Using coordinate labels: $labels_file ($n label(s))"
+
+    local BOX_W=260
+    local BOX_H=42
+    local V_OFFSET=70
+    local H_OFFSET=40
+    local ACCENT_W=4
+
+    # Split the pre-rendered marker image (input [2:v]) into one copy per
+    # label so each can be overlaid independently at its own coordinate.
+    local split_outs=""
+    for ((i = 1; i <= n; i++)); do split_outs+="[dm${i}]"; done
+    LABELS_CHAIN+="[2:v]split=${n}${split_outs};"
+
+    local prev="base"
+    for ((i = 0; i < n; i++)); do
+        local idx=$((i + 1))
+        local x="${xs[$i]}" y="${ys[$i]}" text="${texts[$i]}"
+        printf '%s' "$text" > "$ASSET_DIR/label${idx}.txt"
+
+        local box_y=$((y - V_OFFSET))
+        if [ "$box_y" -lt 20 ]; then
+            box_y=$((y + V_OFFSET - BOX_H))
+        fi
+        local box_x=$((x + H_OFFSET))
+        if [ $((box_x + BOX_W)) -gt 1260 ]; then
+            box_x=$((x - H_OFFSET - BOX_W))
+        fi
+        [ "$box_x" -lt 0 ] && box_x=10
+
+        local seg_y_top seg_y_bot
+        if [ "$box_y" -gt "$y" ]; then
+            seg_y_top=$y; seg_y_bot=$box_y
+        else
+            seg_y_top=$box_y; seg_y_bot=$y
+        fi
+        local seg_h=$((seg_y_bot - seg_y_top))
+        [ "$seg_h" -lt 2 ] && seg_h=2
+
+        local h_left h_w
+        if [ "$box_x" -gt "$x" ]; then
+            h_left=$x; h_w=$((box_x - x))
+        else
+            h_left=$box_x; h_w=$((x - box_x))
+        fi
+        [ "$h_w" -lt 2 ] && h_w=2
+
+        local n1="lbl${idx}_dot" n2="lbl${idx}_v" n3="lbl${idx}_h" n4="lbl${idx}_bg" n5="lbl${idx}_bar" n6="lbl${idx}_outline" n7="lbl${idx}_txt"
+
+        # Gold-tinted connector line (right-angle: vertical then horizontal)
+        LABELS_CHAIN+="[${prev}]drawbox=x=${x}:y=${seg_y_top}:w=2:h=${seg_h}:color=${GOLD}@0.85:t=fill[${n2}];"
+        LABELS_CHAIN+="[${n2}]drawbox=x=${h_left}:y=${box_y}:w=${h_w}:h=2:color=${GOLD}@0.85:t=fill[${n3}];"
+        # Label box: dark fill + gold accent bar (left edge) + thin gold outline
+        LABELS_CHAIN+="[${n3}]drawbox=x=${box_x}:y=${box_y}:w=${BOX_W}:h=${BOX_H}:color=black@0.78:t=fill[${n4}];"
+        LABELS_CHAIN+="[${n4}]drawbox=x=${box_x}:y=${box_y}:w=${ACCENT_W}:h=${BOX_H}:color=${GOLD}:t=fill[${n5}];"
+        LABELS_CHAIN+="[${n5}]drawbox=x=${box_x}:y=${box_y}:w=${BOX_W}:h=${BOX_H}:color=${GOLD}@0.5:t=1[${n6}];"
+        LABELS_CHAIN+="[${n6}]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/label${idx}.txt:fontcolor=white:fontsize=18:x=$((box_x + ACCENT_W + 14)):y=$((box_y + (BOX_H - 18) / 2)):${SHADOW}[${n7}];"
+        # Circular gold-ring/white marker dot, overlaid on top of everything
+        LABELS_CHAIN+="[${n7}][dm${idx}]overlay=x=$((x - 8)):y=$((y - 8))[${n1}];"
+
+        prev="$n1"
+    done
+
+    LABELS_OUT="[${prev}]"
+    echo "Drew $n label(s) from $labels_file"
+}
+
+#############################################
 # prepare_video_content: (re)loads headlines +
 # facts for the video about to stream, and
 # rebuilds BASE_CHAIN / FACT_END to match.
@@ -354,7 +524,12 @@ prepare_video_content() {
     CHAIN+="[1:v]scale=1280:720:flags=fast_bilinear[ovl];"
     CHAIN+="[ovl][video]overlay=0:0[base];"
 
-    CHAIN+="[base]drawbox=x=0:y=0:w=333:h=720:color=black@0.60:t=fill[p1];"
+    # Optional coordinate-based callout labels for this video, drawn onto
+    # the raw video before the panel/UI so the panel stays on top.
+    build_labels_chain "$url"
+    CHAIN+="$LABELS_CHAIN"
+
+    CHAIN+="${LABELS_OUT}drawbox=x=0:y=0:w=333:h=720:color=black@0.60:t=fill[p1];"
     CHAIN+="[p1]drawbox=x=333:y=0:w=4:h=720:color=black@0.45:t=fill[p2];"
     CHAIN+="[p2]drawbox=x=337:y=0:w=4:h=720:color=black@0.30:t=fill[p3];"
     CHAIN+="[p3]drawbox=x=341:y=0:w=4:h=720:color=black@0.15:t=fill[p4];"
@@ -593,6 +768,7 @@ run_video() {
         -re \
         -i "$url" \
         -loop 1 -i overlay.png \
+        -loop 1 -i "$DOT_MARKER" \
         -filter_complex "$filter" \
         -map "[final]" \
         -map 0:a? \
