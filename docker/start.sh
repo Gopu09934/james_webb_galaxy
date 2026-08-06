@@ -2,20 +2,44 @@
 set -euo pipefail
 
 #############################################
+# MARS 2020 PERSEVERANCE ROVER - LIVE STREAM
+# Fetches latest Sol images from NASA and
+# streams a slideshow to YouTube with overlay.
+#
+# FIXES (previous):
+#   1. Image fetching paginates (100/page) to
+#      get up to MAX_IMAGES total images.
+#   2. Each downloaded file is validated via
+#      magic bytes + ffprobe before being added
+#      to the slideshow — prevents "stuck frame"
+#      caused by corrupt/HTML error downloads.
+#
+# NEW:
+#   3. Looping background music. Set MUSIC_URL
+#      (as a secret/env var) to an audio file
+#      URL (mp3/aac/m4a/wav...). It is downloaded
+#      once, then looped continuously (-stream_loop
+#      -1) as the stream's audio track. If unset
+#      or invalid, falls back to silent audio like
+#      before — nothing breaks.
+#   4. Documentary-style slideshow: every image
+#      now gets its own slow zoom/pan (Ken Burns)
+#      via zoompan, and consecutive images are
+#      blended together with a crossfade/wipe
+#      transition (xfade) instead of a hard cut,
+#      cycling through several transition styles.
+#############################################
+
+#############################################
 # Validate Environment Variables
 #############################################
-if [ -z "${VIDEO_URL:-}" ]; then
-    echo "ERROR: VIDEO_URL is not set"
-    exit 1
-fi
 if [ -z "${YOUTUBE_STREAM_KEY:-}" ]; then
     echo "ERROR: YOUTUBE_STREAM_KEY is not set"
     exit 1
 fi
 
-# Subscriber count + live viewer count are optional — if the API creds
-# aren't provided, those panel elements just stay blank instead of
-# failing the whole stream.
+NASA_API_KEY="${NASA_API_KEY:-DEMO_KEY}"
+
 SHOW_STATS=true
 if [ -z "${YOUTUBE_API_KEY:-}" ] || [ -z "${YOUTUBE_CHANNEL_ID:-}" ]; then
     echo "NOTICE: YOUTUBE_API_KEY / YOUTUBE_CHANNEL_ID not set — subscriber/viewer stats will be hidden."
@@ -23,84 +47,634 @@ if [ -z "${YOUTUBE_API_KEY:-}" ] || [ -z "${YOUTUBE_CHANNEL_ID:-}" ]; then
 fi
 
 echo "========================================"
-echo "Starting 24/7 YouTube Stream (Documentary Overlay)"
-echo "Output Resolution : 1280x720 (720p — sized for a 2-core CI runner)"
+echo "Starting Mars 2020 Perseverance Rover Stream"
+echo "Output Resolution : 1280x720 (720p)"
 echo "FPS               : 30"
 echo "========================================"
 
+#############################################
+# Config
+#############################################
 FONT="font.ttf"
 GOLD="0xE8A33D"
 RED="0xE8453C"
+MARS_RED="0xC1440E"
 ASSET_DIR="panel_assets"
-INFO_FILE="galaxy_info.txt"
-SLOT=6            # seconds each headline is shown
-FACT_SLOT=8       # seconds each fun fact is shown
-TICKER_SPEED=110  # pixels/second for the bottom ticker scroll
-CHANNEL_NAME="Technical Talk India"
+IMAGES_DIR="mars_images"
+SLIDE_DURATION=12
+FACT_SLOT=10
+TICKER_SPEED=100
+CHANNEL_NAME="Technical Talk india"
 SHADOW="shadowcolor=black@0.6:shadowx=1:shadowy=1"
-HEADLINE_FONTSIZE=21
-HEADLINE_LINE_SPACING=9
-HEADLINE_LINE_H=$((HEADLINE_FONTSIZE + HEADLINE_LINE_SPACING))
+INFO_FONTSIZE=19
+INFO_LINE_SPACING=8
+MAX_IMAGES=80              # lowered from 301 — 300 simultaneous zoompans/xfades was too heavy for real-time CPU encoding (was rendering at ~0.46x speed)
+PAGE_SIZE=100              # FIX 1: server caps per-request at ~100, we paginate
+VIEWER_MIN_TO_SHOW=10
+
+SUB_ICON_X=1249
+SUB_ICON_Y=677
+SUB_ICON_R=20
+
+MAX_RETRIES=5
+RETRY_DELAY=5
+
+# --- Ken Burns / transition settings (documentary style) ---
+# NOTE ON PERFORMANCE: each image adds one zoompan + one xfade to a
+# single filter graph, all rendered on CPU. That's the actual
+# real-time bottleneck (not the encoder preset). If the stream is
+# still stuttering/lagging behind at MAX_IMAGES=80, lower it further
+# (e.g. 40-60) before touching anything else.
+ZOOM_FPS=24                 # lowered from 30 — cuts zoompan frame-render cost by ~20% with barely visible smoothness difference
+XFADE_DUR=1                 # seconds of crossfade/wipe between consecutive images (kept as an integer to keep bash math simple)
+ZOOM_MAX=1.5                # max zoom factor for the Ken Burns effect
+ZOOM_STEP=0.0015            # per-frame zoom increment/decrement
+KB_SCALE_W=1400             # lowered from 1600 — smaller oversized canvas = cheaper scale/crop/zoompan per frame, still enough headroom for the pan drift below
+KB_SCALE_H=788
+TRANSITIONS=(fade dissolve wipeleft wiperight slideleft slideright smoothleft smoothright)  # dropped circleopen/circleclose — the circular mask math is the most expensive transition type
+
+# --- Live telemetry panel (fills the empty space below the Mars Fact
+# box) ---
+# NOTE: the raw-image feed has no live-weather endpoint, so temp/wind/
+# pressure are seeded from the Sol number into plausible Jezero Crater
+# ranges (based on published MEDA climatology). They hold steady for a
+# whole Sol and change when the Sol changes — not literal live sensor
+# telemetry, just realistic-looking numbers for the documentary feel.
+LANDING_DATE_EPOCH=$(date -u -d '2021-02-18' +%s 2>/dev/null || echo 1613606400)
+ROVER_LAT="18.4446"
+ROVER_LON="77.4509"
+STATUS_SLOT=15              # seconds each rotating rover-status line is shown
+
+# --- Background music (loops for the whole stream) ---
+MUSIC_URL="${MUSIC_URL:-}"          # set this as a secret/env var with a direct audio file URL to enable music
+MUSIC_FILE="$ASSET_DIR/bgm_audio"
+HAVE_MUSIC=false
+
+mkdir -p "$ASSET_DIR" "$IMAGES_DIR"
 
 #############################################
-# Up-next bumper (shown between videos)
+# Mars Facts Pool
 #############################################
-ENABLE_BUMPER=true
-BUMPER_DURATION=5   # seconds
-BUMPER_MESSAGES=(
-    "Stay tuned for more breathtaking views of the Universe."
-    "Discover the latest wonders revealed by the James Webb Space Telescope."
-    "Our journey through deep space continues in just a moment."
-    "Exploring distant galaxies, stars, and cosmic mysteries."
-    "More incredible discoveries from the edge of the observable Universe."
-    "Witness the beauty of the cosmos through the eyes of Webb."
-    "Every observation brings us closer to understanding our cosmic origins."
-    "Prepare for another unforgettable journey across space and time."
-    "New cosmic wonders are waiting just beyond the next frame."
-    "Thank you for exploring the Universe with us. More amazing views are coming soon."
+MARS_FACTS=(
+    "Mars is the fourth planet from the Sun and is known as the Red Planet."
+    "A Martian day (Sol) is 24 hours, 39 minutes, and 35 seconds long."
+    "Mars has two small moons: Phobos and Deimos."
+    "The Perseverance rover landed in Jezero Crater on February 18, 2021."
+    "Jezero Crater is believed to be an ancient lake bed billions of years old."
+    "Perseverance carries the Ingenuity helicopter — the first powered aircraft on another planet."
+    "Mars has the largest volcano in the solar system: Olympus Mons, 21 km tall."
+    "Valles Marineris on Mars is a canyon system over 4,000 km long."
+    "Mars has a thin atmosphere composed mostly of carbon dioxide (95%)."
+    "Surface temperatures on Mars range from -125°C at the poles to 20°C at the equator."
+    "Perseverance has 19 cameras for science, engineering, and navigation."
+    "The rover carries 7 scientific instruments to study Mars geology and astrobiology."
+    "Perseverance is searching for signs of ancient microbial life on Mars."
+    "The MOXIE instrument on Perseverance converts CO2 into oxygen on Mars."
+    "Perseverance has collected rock core samples to be returned to Earth in a future mission."
+    "Mars is about half the size of Earth with a diameter of 6,779 km."
+    "A Martian year lasts about 687 Earth days."
+    "Mars has polar ice caps made of water ice and dry ice (CO2)."
+    "The average distance from Earth to Mars is about 225 million km."
+    "Radio signals from Mars take between 3 and 22 minutes to reach Earth."
+    "NASA's Mars Reconnaissance Orbiter has been studying Mars since 2006."
+    "Ingenuity has flown more than 70 flights on Mars, far exceeding its original 5-flight mission."
+    "The SuperCam instrument on Perseverance uses lasers to analyze rocks from a distance."
+    "Mars dust storms can sometimes engulf the entire planet for weeks or months."
+    "Ancient Mars may have had liquid water rivers, lakes, and possibly an ocean."
+    "Perseverance uses a radioisotope thermoelectric generator for power — it never runs out of sun."
+    "The rover can travel up to 200 meters per Martian day across the surface."
+    "Mastcam-Z on Perseverance can zoom in on objects hundreds of meters away."
+    "Mars has the same land surface area as Earth — there are no oceans."
+    "The first successful Mars rover was Sojourner, which landed in 1997."
+    "Opportunity rover operated for 15 years on Mars, far beyond its 90-day mission."
+    "Curiosity rover has been exploring Gale Crater since August 2012."
+    "RIMFAX radar on Perseverance can peer up to 10 meters below the Martian surface."
+    "Scientists study Mars to understand the history of water in our solar system."
+    "Mars missions help us plan for future human exploration of the Red Planet."
 )
 
 #############################################
-# Auto-restart on failure
+# Mars Headlines Pool
 #############################################
-MAX_RETRIES=5       # per-video retry attempts before moving on
-RETRY_DELAY=5        # seconds between retries
-
-mkdir -p "$ASSET_DIR"
-
-#############################################
-# Generate the coordinate-label marker dot once
-# at startup: a small transparent PNG with a
-# gold-filled center and white ring, matching
-# the panel's gold accent color. Used by
-# build_labels_chain() as ffmpeg input index 2.
-# Always generated (cheap, one frame, 20x20) —
-# harmless/unused by ffmpeg on videos that don't
-# have a matching .labels.txt file.
-#############################################
-DOT_MARKER="dot_marker.png"
-GOLD_R=232; GOLD_G=163; GOLD_B=61
-DOT_VF="format=rgba,geq=r=(if(lte(hypot(X-10\,Y-10)\,5)\,${GOLD_R}\,if(lte(hypot(X-10\,Y-10)\,8)\,255\,0))):g=(if(lte(hypot(X-10\,Y-10)\,5)\,${GOLD_G}\,if(lte(hypot(X-10\,Y-10)\,8)\,255\,0))):b=(if(lte(hypot(X-10\,Y-10)\,5)\,${GOLD_B}\,if(lte(hypot(X-10\,Y-10)\,8)\,255\,0))):a=(if(lte(hypot(X-10\,Y-10)\,8)\,255\,0))"
-ffmpeg -y -f lavfi -i "color=c=black@0.0:s=20x20" -vf "$DOT_VF" -frames:v 1 "$DOT_MARKER" -loglevel error
-if [ ! -s "$DOT_MARKER" ]; then
-    # Guarantee the file always exists and is a valid PNG, even in the
-    # unlikely case the geq-based generation above fails — this is what
-    # gets passed to ffmpeg as a real input on every stream start, so it
-    # must never be missing. Falls back to an invisible 1x1 transparent
-    # pixel (labels would render without a visible dot, but the stream
-    # itself keeps running instead of crashing on a missing input file).
-    echo "WARNING: geq-based marker generation failed — using a blank 1x1 fallback."
-    echo "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" | base64 -d > "$DOT_MARKER"
-fi
+MARS_HEADLINES=(
+    "Perseverance rover exploring ancient Jezero Crater on Mars."
+    "Scientists analyze Martian rock samples collected by Perseverance."
+    "Ingenuity helicopter continues aerial reconnaissance of the Martian surface."
+    "NASA's Perseverance searches for signs of ancient microbial life."
+    "Perseverance collects pristine rock cores from the Martian lakebed."
+    "Mars 2020 mission reveals secrets of Jezero Crater's ancient lake."
+    "Perseverance rover captures stunning views of the Red Planet's terrain."
+    "New Mars data challenges our understanding of early planetary evolution."
+    "MOXIE demonstrates oxygen production from the thin Martian atmosphere."
+    "Scientists map subsurface layers of Mars using RIMFAX ground-penetrating radar."
+    "Mars sample return mission will bring Perseverance's cores back to Earth."
+    "Perseverance's SuperCam laser vaporizes rocks to study their chemistry."
+    "Dust devils and wind patterns reveal Martian atmospheric dynamics."
+    "Ancient delta deposits in Jezero hint at a watery Martian past."
+    "Perseverance teams up with Ingenuity for coordinated surface exploration."
+)
 
 #############################################
-# Background clock writer (avoids fragile
-# drawtext %{gmtime} expansion syntax)
+# Rover Status Pool (cycled in the telemetry panel)
 #############################################
-date -u +'%H:%M:%S  UTC' > "$ASSET_DIR/clock.txt"
+ROVER_STATUSES=(
+    "ACTIVE — EXPLORING"
+    "ACTIVE — DRIVING"
+    "ACTIVE — SAMPLING ROCK CORE"
+    "ACTIVE — IMAGING TERRAIN"
+    "ACTIVE — TRANSMITTING DATA"
+    "ACTIVE — ANALYZING SPECTRA"
+)
+
+#############################################
+# Prepare looping background music (once)
+#############################################
+prepare_music() {
+    if [ -z "$MUSIC_URL" ]; then
+        echo "NOTICE: MUSIC_URL not set — streaming with silent audio track."
+        return
+    fi
+
+    echo "----------------------------------------"
+    echo "Downloading background music from MUSIC_URL..."
+    echo "----------------------------------------"
+
+    local attempt=1
+    while [ "$attempt" -le 3 ]; do
+        if curl -sSL --max-time 60 -o "$MUSIC_FILE" "$MUSIC_URL"; then
+            if [ -s "$MUSIC_FILE" ] && ffprobe -v error -select_streams a:0 \
+                -show_entries stream=codec_type -of csv=p=0 "$MUSIC_FILE" 2>/dev/null | grep -q audio; then
+                echo "Music downloaded and validated: $MUSIC_FILE"
+                HAVE_MUSIC=true
+                return
+            fi
+        fi
+        echo "  Music download/validation failed (attempt ${attempt}/3), retrying..."
+        rm -f "$MUSIC_FILE"
+        attempt=$((attempt + 1))
+        sleep 3
+    done
+
+    echo "WARNING: Could not fetch valid audio from MUSIC_URL — falling back to silent audio."
+    HAVE_MUSIC=false
+}
+
+#############################################
+# FIX 1: fetch_mars_images — PAGINATED
+#
+# mars.nasa.gov silently ignores num > ~100.
+# We page through (page=0, 1, 2...) appending
+# results via mapfile -O until we hit MAX_IMAGES
+# or a page returns 0 results.
+#############################################
+fetch_mars_images() {
+    echo "----------------------------------------"
+    echo "Fetching latest Mars 2020 raw images (paginated, up to ${MAX_IMAGES})..."
+    echo "----------------------------------------"
+
+    local BASE_URL="https://mars.nasa.gov/rss/api/?feed=raw_images&category=mars2020&feedtype=json&order=sol%20desc"
+
+    # Step 1: probe to find the latest Sol
+    local probe_url="${BASE_URL}&num=1&page=0"
+    echo "Probing latest Sol: $probe_url"
+    local probe_resp
+    probe_resp=$(curl -sSL --max-time 30 --retry 3 --retry-delay 5 \
+        -H "Accept: application/json" \
+        -A "MarsLiveStream/1.0" \
+        "$probe_url" 2>/tmp/probe_err) || true
+
+    if [ -s /tmp/probe_err ]; then
+        echo "  curl stderr: $(cat /tmp/probe_err)"
+    fi
+    echo "  Probe response preview: ${probe_resp:0:200}"
+
+    CURRENT_SOL=""
+    if command -v jq &>/dev/null; then
+        CURRENT_SOL=$(echo "$probe_resp" | jq -r '.images[0].sol // empty' 2>/dev/null || true)
+    fi
+    if [ -z "${CURRENT_SOL:-}" ]; then
+        CURRENT_SOL=$(echo "$probe_resp" | grep -o '"sol":[0-9]*' | head -1 | grep -o '[0-9]*')
+    fi
+    if [ -z "${CURRENT_SOL:-}" ]; then
+        echo "ERROR: Could not determine latest Sol. Full response:"
+        echo "$probe_resp"
+        return 1
+    fi
+    echo "Latest Sol: $CURRENT_SOL"
+
+    # Step 2: paginate through Sol-filtered images
+    FETCHED_IMAGES=()
+    CAMERA_NAMES=()
+    EARTH_DATES=()
+    SOL_TIMES=()
+    IMG_CAPTIONS=()
+
+    local page=0
+    while [ "${#FETCHED_IMAGES[@]}" -lt "$MAX_IMAGES" ]; do
+        local url="${BASE_URL}&num=${PAGE_SIZE}&page=${page}&condition_2=${CURRENT_SOL}:sol:eq"
+        echo "  Page $page | have ${#FETCHED_IMAGES[@]} images so far..."
+        local resp
+        resp=$(curl -sSL --max-time 60 --retry 3 --retry-delay 5 \
+            -H "Accept: application/json" \
+            -A "MarsLiveStream/1.0" \
+            "$url" 2>/dev/null) || true
+
+        local batch_count=0
+        if command -v jq &>/dev/null; then
+            batch_count=$(echo "$resp" | jq '.images | length' 2>/dev/null || echo 0)
+        else
+            batch_count=$(echo "$resp" | grep -c '"sol"' 2>/dev/null || echo 0)
+        fi
+
+        if [ "${batch_count:-0}" -eq 0 ]; then
+            echo "  Page $page returned 0 images — no more pages."
+            break
+        fi
+
+        # Append this page into arrays using -O offset
+        if command -v jq &>/dev/null; then
+            local offset=${#FETCHED_IMAGES[@]}
+            mapfile -t -O "$offset" FETCHED_IMAGES < <(echo "$resp" | jq -r '.images[].image_files.large // .images[].image_files.medium // empty' 2>/dev/null)
+            mapfile -t -O "$offset" CAMERA_NAMES  < <(echo "$resp" | jq -r '.images[].camera.instrument // empty' 2>/dev/null)
+            mapfile -t -O "$offset" EARTH_DATES   < <(echo "$resp" | jq -r '.images[].date_taken_utc // empty' 2>/dev/null)
+            mapfile -t -O "$offset" SOL_TIMES     < <(echo "$resp" | jq -r '.images[].date_taken_mars // empty' 2>/dev/null)
+            mapfile -t -O "$offset" IMG_CAPTIONS  < <(echo "$resp" | jq -r '.images[].title // empty' 2>/dev/null)
+        else
+            echo "WARNING: jq not installed — grep fallback (pagination limited)"
+            local offset=${#FETCHED_IMAGES[@]}
+            mapfile -t -O "$offset" FETCHED_IMAGES < <(echo "$resp" | grep -o '"large":"[^"]*"' | sed 's/"large":"//;s/"//')
+            mapfile -t -O "$offset" CAMERA_NAMES  < <(echo "$resp" | grep -o '"instrument":"[^"]*"' | sed 's/"instrument":"//;s/"//')
+            mapfile -t -O "$offset" EARTH_DATES   < <(echo "$resp" | grep -o '"date_taken_utc":"[^"]*"' | sed 's/"date_taken_utc":"//;s/"//')
+        fi
+
+        echo "  Page $page: +$batch_count images (total: ${#FETCHED_IMAGES[@]})"
+
+        # If page returned fewer than PAGE_SIZE, it's the last page
+        if [ "$batch_count" -lt "$PAGE_SIZE" ]; then
+            echo "  Last page reached ($batch_count < $PAGE_SIZE)."
+            break
+        fi
+
+        page=$((page + 1))
+        sleep 0.3   # be polite to NASA servers
+    done
+
+    local n=${#FETCHED_IMAGES[@]}
+    echo "Pagination done: $n URLs for Sol $CURRENT_SOL"
+
+    # Step 3: fallback — Sol filter returned 0, take unfiltered latest
+    if [ "$n" -eq 0 ]; then
+        echo "  Sol filter returned 0 — falling back to unfiltered latest images..."
+        local fb_page=0
+        while [ "${#FETCHED_IMAGES[@]}" -lt "$MAX_IMAGES" ]; do
+            local fallback_url="${BASE_URL}&num=${PAGE_SIZE}&page=${fb_page}"
+            local resp
+            resp=$(curl -sSL --max-time 60 --retry 3 --retry-delay 5 \
+                -H "Accept: application/json" -A "MarsLiveStream/1.0" \
+                "$fallback_url" 2>/dev/null) || true
+
+            local batch_count=0
+            if command -v jq &>/dev/null; then
+                batch_count=$(echo "$resp" | jq '.images | length' 2>/dev/null || echo 0)
+            fi
+            [ "${batch_count:-0}" -eq 0 ] && break
+
+            if command -v jq &>/dev/null; then
+                local offset=${#FETCHED_IMAGES[@]}
+                mapfile -t -O "$offset" FETCHED_IMAGES < <(echo "$resp" | jq -r '.images[].image_files.large // .images[].image_files.medium // empty' 2>/dev/null)
+                mapfile -t -O "$offset" CAMERA_NAMES  < <(echo "$resp" | jq -r '.images[].camera.instrument // empty' 2>/dev/null)
+                mapfile -t -O "$offset" EARTH_DATES   < <(echo "$resp" | jq -r '.images[].date_taken_utc // empty' 2>/dev/null)
+                mapfile -t -O "$offset" SOL_TIMES     < <(echo "$resp" | jq -r '.images[].date_taken_mars // empty' 2>/dev/null)
+                mapfile -t -O "$offset" IMG_CAPTIONS  < <(echo "$resp" | jq -r '.images[].title // empty' 2>/dev/null)
+                if [ "$fb_page" -eq 0 ]; then
+                    local fallback_sol
+                    fallback_sol=$(echo "$resp" | jq -r '.images[0].sol // empty' 2>/dev/null || true)
+                    [ -n "$fallback_sol" ] && CURRENT_SOL="$fallback_sol"
+                fi
+            fi
+
+            echo "  Fallback page $fb_page: +$batch_count (total: ${#FETCHED_IMAGES[@]})"
+            [ "$batch_count" -lt "$PAGE_SIZE" ] && break
+            fb_page=$((fb_page + 1))
+            sleep 0.3
+        done
+        n=${#FETCHED_IMAGES[@]}
+        echo "  Fallback total: $n images (Sol $CURRENT_SOL)"
+    fi
+
+    if [ "$n" -eq 0 ]; then
+        echo "ERROR: No images fetched from mars.nasa.gov. Check network connectivity."
+        return 1
+    fi
+
+    # Trim to MAX_IMAGES
+    if [ "$n" -gt "$MAX_IMAGES" ]; then
+        FETCHED_IMAGES=("${FETCHED_IMAGES[@]:0:$MAX_IMAGES}")
+        CAMERA_NAMES=("${CAMERA_NAMES[@]:0:$MAX_IMAGES}")
+        EARTH_DATES=("${EARTH_DATES[@]:0:$MAX_IMAGES}")
+        SOL_TIMES=("${SOL_TIMES[@]:0:$MAX_IMAGES}")
+        IMG_CAPTIONS=("${IMG_CAPTIONS[@]:0:$MAX_IMAGES}")
+        n=$MAX_IMAGES
+    fi
+
+    echo "SUCCESS: Sol $CURRENT_SOL — $n images ready to download."
+    return 0
+}
+
+#############################################
+# FIX 2: download_images — HTTP + JPEG validation
+#
+# NASA CDN sometimes returns HTML error pages
+# (200 OK, non-empty, but not a JPEG). ffmpeg
+# then hits this "jpg", can't decode it, and
+# freezes on the last good frame.
+#
+# Now we check:
+#   a) HTTP status must be 200
+#   b) First 2 bytes must be FF D8 (JPEG magic)
+#   c) ffprobe must be able to decode the file
+# Any failure: delete the file, skip it.
+#############################################
+download_images() {
+    local n=${#FETCHED_IMAGES[@]}
+    echo "Downloading and validating $n images for Sol $CURRENT_SOL..."
+    rm -f "$IMAGES_DIR"/*.jpg "$IMAGES_DIR"/*.JPG 2>/dev/null || true
+
+    local downloaded=0 rejected=0 idx=0
+    for url in "${FETCHED_IMAGES[@]}"; do
+        idx=$((idx + 1))
+        local outfile="$IMAGES_DIR/mars_sol${CURRENT_SOL}_$(printf '%03d' $idx).jpg"
+
+        # Download and capture HTTP status code in one pass
+        local http_code
+        http_code=$(curl -sL --max-time 30 \
+            -o "$outfile" \
+            -w '%{http_code}' \
+            "$url" 2>/dev/null || echo "000")
+
+        # Reject non-200 or empty files
+        if [ "$http_code" != "200" ] || [ ! -s "$outfile" ]; then
+            [ -f "$outfile" ] && rm -f "$outfile"
+            rejected=$((rejected + 1))
+            continue
+        fi
+
+        # Validate JPEG magic bytes: first 2 bytes must be FF D8
+        local magic
+        magic=$(head -c 2 "$outfile" 2>/dev/null | od -An -tx1 | tr -d ' \n')
+        if [[ "$magic" != "ffd8"* ]]; then
+            echo "  [REJECT] $(basename "$outfile"): not a JPEG (magic=$magic) — likely HTML error page"
+            rm -f "$outfile"
+            rejected=$((rejected + 1))
+            continue
+        fi
+
+        # ffprobe check — catches truncated or corrupt JPEGs
+        if ! ffprobe -v error \
+            -select_streams v:0 \
+            -show_entries stream=width \
+            -of csv=p=0 \
+            "$outfile" >/dev/null 2>&1; then
+            echo "  [REJECT] $(basename "$outfile"): ffprobe decode failed (corrupt JPEG)"
+            rm -f "$outfile"
+            rejected=$((rejected + 1))
+            continue
+        fi
+
+        downloaded=$((downloaded + 1))
+    done
+
+    echo "Download complete: $downloaded valid / $n total ($rejected rejected)."
+    DOWNLOAD_COUNT=$downloaded
+}
+
+#############################################
+# Generate live telemetry text: seeded weather,
+# time-on-Mars, location, and a shuffled pool of
+# rotating rover-status lines. See the NOTE above
+# LANDING_DATE_EPOCH re: weather being simulated.
+#############################################
+generate_telemetry_assets() {
+    local seed=$((CURRENT_SOL + 1000))
+    RANDOM=$seed
+    local temp_high=$(( -35 - (RANDOM % 20) ))      # -35 to -54 C daytime high
+    RANDOM=$((seed + 1))
+    local wind=$(( 6 + (RANDOM % 24) ))             # 6-29 km/h
+    RANDOM=$((seed + 2))
+    local pressure=$(( 640 + (RANDOM % 120) ))      # 640-759 Pa
+
+    printf '%s°C' "$temp_high" > "$ASSET_DIR/temp.txt"
+    printf '%s km/h' "$wind"   > "$ASSET_DIR/wind.txt"
+    printf '%s Pa' "$pressure" > "$ASSET_DIR/pressure.txt"
+
+    local now_epoch mission_days
+    now_epoch=$(date -u +%s)
+    mission_days=$(( (now_epoch - LANDING_DATE_EPOCH) / 86400 ))
+    printf 'SOL %s  •  %s days on Mars' "$CURRENT_SOL" "$mission_days" > "$ASSET_DIR/timeonmars.txt"
+
+    printf '%s°N  %s°E' "$ROVER_LAT" "$ROVER_LON" > "$ASSET_DIR/location.txt"
+
+    local i idx
+    local SHUFFLED_STATUS=()
+    while IFS= read -r line; do
+        SHUFFLED_STATUS+=("$line")
+    done < <(printf '%s\n' "${ROVER_STATUSES[@]}" | shuf)
+    STATUS_N=${#SHUFFLED_STATUS[@]}
+    for i in "${!SHUFFLED_STATUS[@]}"; do
+        idx=$((i + 1))
+        printf '%s' "${SHUFFLED_STATUS[$i]}" > "$ASSET_DIR/status${idx}.txt"
+    done
+}
+
+#############################################
+# Write panel text files
+#############################################
+write_panel_assets() {
+    generate_telemetry_assets
+    printf 'MARS 2020'                          > "$ASSET_DIR/title1.txt"
+    printf 'P E R S E V E R A N C E  R O V E R' > "$ASSET_DIR/title2.txt"
+    printf "SOL %s RAW IMAGERY"  "$CURRENT_SOL" > "$ASSET_DIR/header.txt"
+    printf 'LIVE FROM THE RED PLANET'           > "$ASSET_DIR/eyebrow.txt"
+    printf 'SUBSCRIBE for daily Mars updates'   > "$ASSET_DIR/cta.txt"
+    printf 'MARS FACT'                          > "$ASSET_DIR/fact_label.txt"
+
+    local i idx
+    local SHUFFLED_FACTS=()
+    while IFS= read -r line; do
+        SHUFFLED_FACTS+=("$line")
+    done < <(printf '%s\n' "${MARS_FACTS[@]}" | shuf)
+    FACT_N=${#SHUFFLED_FACTS[@]}
+    for i in "${!SHUFFLED_FACTS[@]}"; do
+        idx=$((i + 1))
+        echo "${SHUFFLED_FACTS[$i]}" | fold -s -w 24 > "$ASSET_DIR/fact${idx}.txt"
+    done
+
+    local SHUFFLED_HEADS=()
+    while IFS= read -r line; do
+        SHUFFLED_HEADS+=("$line")
+    done < <(printf '%s\n' "${MARS_HEADLINES[@]}" | shuf)
+    HEAD_N=${#SHUFFLED_HEADS[@]}
+
+    local TICKER_STRING=""
+    for line in "${SHUFFLED_HEADS[@]}"; do
+        TICKER_STRING+="${line}     •     "
+    done
+    printf '%s' "$TICKER_STRING" > "$ASSET_DIR/ticker.txt"
+}
+
+#############################################
+# Collect sorted list of downloaded image files
+# (replaces the old concat-list builder — each
+# image is now its own ffmpeg input so it can
+# get its own Ken Burns zoom/pan)
+#############################################
+build_image_array() {
+    IMAGE_FILES=()
+    while IFS= read -r f; do
+        IMAGE_FILES+=("$f")
+    done < <(ls "$IMAGES_DIR"/mars_sol*.jpg 2>/dev/null | sort)
+    echo "Image array built: ${#IMAGE_FILES[@]} slides for Sol $CURRENT_SOL"
+}
+
+#############################################
+# NEW: Ken Burns + crossfade slideshow chain
+#
+# Every image gets a slow zoom/pan (zoompan),
+# then consecutive slides are stitched with an
+# xfade transition (fade/dissolve/wipe/slide/
+# circle — rotated from TRANSITIONS) instead of
+# a hard cut.
+#
+# Timing trick: every clip except the last is
+# rendered for SLIDE_DURATION + XFADE_DUR
+# seconds. xfade "eats" that extra XFADE_DUR
+# tail to do the transition, so slide boundaries
+# in the merged output still land on exact
+# multiples of SLIDE_DURATION — which means
+# build_slide_info_chain() below (captions, the
+# progress bar, the dot indicators) needs no
+# changes at all to stay in sync.
+#############################################
+build_slideshow_filter() {
+    local n="$1"
+    local chain=""
+    local prev=""
+
+    for ((i = 0; i < n; i++)); do
+        local is_last=0
+        [ "$i" -eq $((n - 1)) ] && is_last=1
+
+        local dur=$SLIDE_DURATION
+        [ "$is_last" -eq 0 ] && dur=$((SLIDE_DURATION + XFADE_DUR))
+        local frames=$((dur * ZOOM_FPS))
+
+        # Alternate 4 Ken Burns variants for visual variety
+        local variant=$((i % 4))
+        local z x y
+        case "$variant" in
+            0) # slow zoom-in, centered
+                z="min(zoom+${ZOOM_STEP}\,${ZOOM_MAX})"
+                x="iw/2-(iw/zoom/2)"
+                y="ih/2-(ih/zoom/2)"
+                ;;
+            1) # slow zoom-out, centered
+                z="if(eq(on\,1)\,${ZOOM_MAX}\,max(1.001\,zoom-${ZOOM_STEP}))"
+                x="iw/2-(iw/zoom/2)"
+                y="ih/2-(ih/zoom/2)"
+                ;;
+            2) # zoom-in, drifting toward top-right
+                z="min(zoom+${ZOOM_STEP}\,${ZOOM_MAX})"
+                x="iw/2-(iw/zoom/2)+(on*0.35)"
+                y="ih/2-(ih/zoom/2)-(on*0.20)"
+                ;;
+            3) # zoom-in, drifting toward bottom-left
+                z="min(zoom+${ZOOM_STEP}\,${ZOOM_MAX})"
+                x="iw/2-(iw/zoom/2)-(on*0.35)"
+                y="ih/2-(ih/zoom/2)+(on*0.20)"
+                ;;
+        esac
+
+        local label="img${i}"
+        chain+="[${i}:v]scale=${KB_SCALE_W}:${KB_SCALE_H}:force_original_aspect_ratio=increase,"
+        chain+="crop=${KB_SCALE_W}:${KB_SCALE_H},"
+        chain+="zoompan=z='${z}':x='${x}':y='${y}':d=${frames}:s=1280x720:fps=${ZOOM_FPS},"
+        chain+="format=yuv420p,setsar=1[${label}];"
+
+        if [ "$i" -eq 0 ]; then
+            prev="$label"
+        else
+            local transition="${TRANSITIONS[$(( (i - 1) % ${#TRANSITIONS[@]} ))]}"
+            local offset=$((i * SLIDE_DURATION))
+            local nxt="xf${i}"
+            chain+="[${prev}][${label}]xfade=transition=${transition}:duration=${XFADE_DUR}:offset=${offset}[${nxt}];"
+            prev="$nxt"
+        fi
+    done
+
+    # Documentary-style grading on the raw NASA photos themselves —
+    # brightened/punched up here (not on the final composite) so the
+    # left info panel's contrast never depends on how bright/washed-out
+    # a given Mars sky frame happens to be.
+    chain+="[${prev}]eq=brightness=0.06:contrast=1.18:saturation=1.15:gamma=1.04[${prev}_graded];"
+
+    SLIDESHOW_FILTER="$chain"
+    SLIDESHOW_LABEL="${prev}_graded"
+}
+
+#############################################
+# Build per-slide info overlay
+#############################################
+build_slide_info_chain() {
+    local n="$1"
+    local chain=""
+    local prev="base"
+    local CYCLE=$((n * SLIDE_DURATION))
+
+    for ((i = 0; i < n; i++)); do
+        local idx=$((i + 1))
+        local start=$((i * SLIDE_DURATION))
+        local end=$((start + SLIDE_DURATION))
+        local cam="${CAMERA_NAMES[$i]:-Unknown Camera}"
+        local edate="${EARTH_DATES[$i]:-}"
+
+        printf 'TRANSMISSION FROM MARS\nSol %s  ·  Frame %d of %d\n%s' \
+            "$CURRENT_SOL" "$idx" "$n" "$cam" \
+            > "$ASSET_DIR/slide_info${idx}.txt"
+        if [ -n "$edate" ]; then
+            local edate_short="${edate:0:16}"
+            edate_short="${edate_short/T/ }"
+            printf '\nEarth Date: %s UTC' "$edate_short" >> "$ASSET_DIR/slide_info${idx}.txt"
+        fi
+
+        local ENABLE="between(mod(t\,${CYCLE})\,${start}\,${end})"
+        local ALPHA="if(between(mod(t\,${CYCLE})\,${start}\,${end})\,if(lt(mod(t\,${CYCLE})-${start}\,0.5)\,(mod(t\,${CYCLE})-${start})/0.5\,if(gt(mod(t\,${CYCLE})-${start}\,${SLIDE_DURATION}-0.5)\,(${end}-mod(t\,${CYCLE}))/0.5\,1))\,0)"
+
+        # Solid lower-third card behind the caption — this is what
+        # actually fixes readability over bright/washed-out sky
+        # frames, where plain white text with just a drop shadow used
+        # to disappear. The card snaps on/off (fine, since the text
+        # drawn on top of it still fades smoothly via ALPHA).
+        local box="sib${idx}"
+        chain+="[${prev}]drawbox=x=365:y=548:w=350:h=118:color=black@0.55:t=fill:enable='${ENABLE}'[${box}];"
+        local barlbl="sil${idx}"
+        chain+="[${box}]drawbox=x=365:y=548:w=4:h=118:color=${MARS_RED}:t=fill:enable='${ENABLE}'[${barlbl}];"
+
+        local nxt="si${idx}"
+        chain+="[${barlbl}]drawtext=fontfile=${FONT}:expansion=none:textfile=${ASSET_DIR}/slide_info${idx}.txt:fontcolor=white:fontsize=15:line_spacing=7:x=385:y=560:alpha='${ALPHA}':borderw=1.5:bordercolor=black@0.85:${SHADOW}[${nxt}];"
+        prev="$nxt"
+    done
+
+    SLIDE_INFO_CHAIN="$chain"
+    SLIDE_INFO_END="$prev"
+}
+
+#############################################
+# Background clock writer
+#############################################
+date -u +'%d %b %Y  •  %H:%M:%S UTC' > "$ASSET_DIR/clock.txt"
 (
     while true; do
-        date -u +'%H:%M:%S  UTC' > "$ASSET_DIR/clock.txt.tmp"
+        date -u +'%d %b %Y  •  %H:%M:%S UTC' > "$ASSET_DIR/clock.txt.tmp"
         mv -f "$ASSET_DIR/clock.txt.tmp" "$ASSET_DIR/clock.txt"
         sleep 1
     done
@@ -108,10 +682,7 @@ date -u +'%H:%M:%S  UTC' > "$ASSET_DIR/clock.txt"
 CLOCK_PID=$!
 
 #############################################
-# Background subscriber-count writer
-# (polls YouTube Data API every 60s — subs
-# don't change second to second, and this
-# respects API quota)
+# Background subscriber count writer
 #############################################
 printf ' ' > "$ASSET_DIR/subs.txt"
 SUBS_PID=""
@@ -122,20 +693,12 @@ if [ "$SHOW_STATS" = true ]; then
             RESP=$(curl -s "https://www.googleapis.com/youtube/v3/channels?part=statistics&id=${YOUTUBE_CHANNEL_ID}&key=${YOUTUBE_API_KEY}" || true)
             COUNT=$(echo "$RESP" | grep -o '"subscriberCount"[^"]*"[0-9]*"' | grep -oE '[0-9]+')
             if [ -n "$COUNT" ]; then
-                # Manual comma insertion — locale-independent, so it works
-                # the same regardless of the container's default locale
-                # (printf "%'d" silently fails to group digits under the
-                # bare "C" locale that Ubuntu containers ship with).
                 FORMATTED=$(echo "$COUNT" | rev | sed 's/\(...\)/\1,/g' | rev | sed 's/^,//')
                 printf '%s subscribers' "$FORMATTED" > "$ASSET_DIR/subs.txt.tmp"
                 mv -f "$ASSET_DIR/subs.txt.tmp" "$ASSET_DIR/subs.txt"
                 WARNED_ONCE=false
             elif [ "$WARNED_ONCE" = false ]; then
-                # Log the raw response once so it shows up in the Actions
-                # log — this tells us exactly why the count isn't parsing
-                # (bad channel ID, disabled API, quota, key restrictions, etc.)
-                echo "WARNING: could not parse subscriberCount from API response. Raw response:"
-                echo "$RESP"
+                echo "WARNING: could not parse subscriberCount from API"
                 WARNED_ONCE=true
             fi
             sleep 60
@@ -145,13 +708,7 @@ if [ "$SHOW_STATS" = true ]; then
 fi
 
 #############################################
-# Background live-viewer-count writer
-# Strategy: find the channel's currently-live
-# video once (search.list — costs more quota,
-# so only called when we don't already have an
-# id), then poll videos.list (cheap, 1 unit)
-# every 30s for concurrentViewers. If the
-# broadcast ends/restarts, re-search.
+# Background live viewer count writer
 #############################################
 printf ' ' > "$ASSET_DIR/viewers.txt"
 VIEWERS_PID=""
@@ -166,12 +723,11 @@ if [ "$SHOW_STATS" = true ]; then
             if [ -n "$LIVE_VIDEO_ID" ]; then
                 VRESP=$(curl -s "https://www.googleapis.com/youtube/v3/videos?part=liveStreamingDetails&id=${LIVE_VIDEO_ID}&key=${YOUTUBE_API_KEY}" || true)
                 VIEWERS=$(echo "$VRESP" | grep -o '"concurrentViewers": *"[0-9]*"' | grep -o '[0-9]*')
-                if [ -n "$VIEWERS" ]; then
+                if [ -n "$VIEWERS" ] && [ "$VIEWERS" -ge "$VIEWER_MIN_TO_SHOW" ]; then
                     printf '%s watching now' "$VIEWERS" > "$ASSET_DIR/viewers.txt.tmp"
                     mv -f "$ASSET_DIR/viewers.txt.tmp" "$ASSET_DIR/viewers.txt"
                 else
-                    # Broadcast ended or hasn't registered yet — clear and re-search.
-                    LIVE_VIDEO_ID=""
+                    [ -n "$VIEWERS" ] && LIVE_VIDEO_ID=""
                     printf ' ' > "$ASSET_DIR/viewers.txt"
                 fi
             fi
@@ -181,597 +737,228 @@ if [ "$SHOW_STATS" = true ]; then
     VIEWERS_PID=$!
 fi
 
-trap 'kill "$CLOCK_PID" 2>/dev/null || true; [ -n "$SUBS_PID" ] && kill "$SUBS_PID" 2>/dev/null || true; [ -n "$VIEWERS_PID" ] && kill "$VIEWERS_PID" 2>/dev/null || true' EXIT
+trap 'kill "$CLOCK_PID" 2>/dev/null || true
+      [ -n "$SUBS_PID" ]    && kill "$SUBS_PID"    2>/dev/null || true
+      [ -n "$VIEWERS_PID" ] && kill "$VIEWERS_PID" 2>/dev/null || true
+      echo "Stream ended — cleaning up."' EXIT
 
 #############################################
-# Static panel text (unchanged across videos)
+# build_full_filter
 #############################################
-printf 'J A M E S   W E B B'              > "$ASSET_DIR/title1.txt"
-printf 'S P A C E   T E L E S C O P E'    > "$ASSET_DIR/title2.txt"
-printf "T O D A Y ' S   D I S C O V E R Y" > "$ASSET_DIR/header.txt"
-printf 'DEEP SPACE REPORT'                > "$ASSET_DIR/eyebrow.txt"
-printf 'SUBSCRIBE for daily space discoveries' > "$ASSET_DIR/cta.txt"
-printf 'DID YOU KNOW' > "$ASSET_DIR/fact_label.txt"
-
-#############################################
-# Default headline / fact pools (used as a
-# last resort if galaxy_info.txt / facts.txt
-# are missing or empty)
-#############################################
-DEFAULT_HEADLINES=(
-    "The James Webb Space Telescope is capturing the deepest infrared views of the early Universe ever recorded."
-    "Webb has detected galaxies that formed just a few hundred million years after the Big Bang."
-    "Scientists are using Webb to analyze the atmospheres of distant exoplanets with unprecedented precision."
-    "Powerful infrared observations are revealing stars being born inside dense clouds of cosmic dust."
-    "Astronomers are studying supermassive black holes that existed surprisingly early in cosmic history."
-    "Webb is helping researchers understand how galaxies grew and evolved across billions of years."
-    "New observations are uncovering complex organic molecules in star-forming regions throughout the Milky Way."
-    "Planetary systems around distant stars are showing remarkable diversity in size, composition, and structure."
-    "The Euclid mission is creating the largest 3D map of the Universe to investigate dark matter and dark energy."
-    "The Vera C. Rubin Observatory is expected to transform astronomy with its wide-field survey of the southern sky."
-    "Gravitational wave observatories are detecting collisions between black holes and neutron stars across the cosmos."
-    "NASA and international space missions continue expanding our understanding of planets, stars, galaxies, and Universe."
-    "Webb is observing protoplanetary disks where new planets are actively forming around young stars."
-    "Astronomers continue discovering ancient galaxies that challenge existing models of the early Universe."
-    "Every new Webb observation provides valuable insights into the history, evolution, and future of our cosmos."
-)
-
-DEFAULT_FACTS=(
-    "The Universe is approximately 13.8 billion years old."
-    "A light-year is the distance light travels in one year, about 9.46 trillion kilometers."
-    "The James Webb Space Telescope observes the Universe primarily in infrared light."
-    "Webb has detected galaxies that formed only a few hundred million years after the Big Bang."
-    "Scientists use Webb to study the atmospheres of distant exoplanets in remarkable detail."
-    "Webb is revealing stars forming inside dense clouds of gas and cosmic dust."
-    "Astronomers are discovering massive black holes that existed much earlier than previously expected."
-    "The Euclid space telescope is mapping billions of galaxies to study dark matter and dark energy."
-    "The Vera C. Rubin Observatory will survey the southern sky and discover millions of new celestial objects."
-    "The Milky Way contains hundreds of billions of stars."
-    "The observable Universe contains billions of galaxies."
-    "The Sun contains about 99.8 percent of the total mass in our solar system."
-    "Jupiter is the largest planet in our solar system."
-    "Mars is home to Olympus Mons, the largest volcano in the solar system."
-    "Saturn's rings are composed mostly of ice particles with smaller amounts of rock and dust."
-    "Venus is the hottest planet in our solar system because of its dense carbon dioxide atmosphere."
-    "Mercury experiences the largest temperature variations of any planet in the solar system."
-    "Neptune has the fastest winds recorded on any planet, reaching over 2,000 kilometers per hour."
-    "Uranus rotates on its side, likely because of a massive collision early in its history."
-    "Earth is the only known planet confirmed to support life."
-    "The Moon moves about 3.8 centimeters farther away from Earth each year."
-    "The International Space Station travels around Earth at about 28,000 kilometers per hour."
-    "Neutron stars are so dense that a teaspoon of their material would weigh billions of tons."
-    "A black hole's gravity is so strong that not even light can escape beyond its event horizon."
-    "The Milky Way's central supermassive black hole is known as Sagittarius A*."
-    "Gravitational waves are ripples in space-time produced by massive cosmic collisions."
-    "Dark matter cannot be seen directly but its gravity shapes galaxies and galaxy clusters."
-    "Dark energy is believed to drive the accelerating expansion of the Universe."
-    "The Milky Way and Andromeda galaxies are expected to merge in about 4.5 billion years."
-    "A supernova is the powerful explosion that marks the end of a massive star's life."
-    "The Sun's core reaches temperatures of around 15 million degrees Celsius."
-    "Proxima Centauri is the closest known star to the Sun."
-    "Thousands of exoplanets have been confirmed orbiting stars beyond our solar system."
-    "Some exoplanets may contain water-rich atmospheres or rocky surfaces."
-    "The largest known structures in the Universe are cosmic filaments stretching across billions of light-years."
-    "Time passes more slowly near extremely strong gravitational fields, as predicted by Einstein's theory of relativity."
-    "Voyager 1 is the most distant human-made object from Earth."
-    "Voyager 1 entered interstellar space in 2012 and continues sending scientific data."
-    "Earth's magnetic field protects life by deflecting harmful charged particles from the Sun."
-    "Auroras occur when energetic particles from the Sun collide with gases in Earth's upper atmosphere."
-    "James Webb has captured some of the deepest and sharpest infrared images ever recorded."
-    "Webb is helping scientists understand how the first galaxies formed after the Big Bang."
-    "Some galaxies observed by Webb are more massive than astronomers expected for the early Universe."
-    "Star-forming nebulae contain the gas and dust needed to create new stars and planets."
-    "The asteroid belt between Mars and Jupiter contains millions of rocky objects."
-    "Comets are icy objects that develop glowing tails when they approach the Sun."
-    "Pulsars are rapidly rotating neutron stars that emit regular beams of radio waves."
-    "The Event Horizon Telescope captured the first images of black holes in 2019 and 2022."
-    "The search for Earth-like exoplanets is one of the most exciting areas of modern astronomy."
-)
-
-#############################################
-# build_labels_chain: optional feature — draws
-# pointer/callout labels onto specific
-# coordinates in the video, similar to
-# hand-annotated documentary footage. Fully
-# optional per video: only activates if a file
-# named <basename>.labels.txt exists.
-#
-# File format — one label per line, comma
-# separated:
-#   x,y,Label text here
-# where x,y is the pixel position on the
-# 1280x720 output frame that the label should
-# point at. Box placement, connector line, and
-# edge-avoidance (flips below/left near frame
-# edges) are computed automatically.
-#
-# Visual style matches the rest of the panel:
-# gold-ring/white marker dot (uses the
-# pre-rendered dot_marker.png), gold-tinted
-# connector line, and a label box with a gold
-# accent bar + thin gold outline (same language
-# as the CTA box).
-#
-# Notes/limits:
-#  - Keep label text under ~28 characters — the
-#    box is a fixed width and does not
-#    reflow/resize to fit longer text.
-#  - Best used for points with x > ~370 so
-#    labels don't collide with the left info
-#    panel.
-#  - The connector is a right-angle line
-#    (vertical then horizontal), not a true
-#    diagonal — ffmpeg has no native diagonal
-#    line primitive without much heavier
-#    filters, so this is the practical choice.
-#  - Requires dot_marker.png (generated once at
-#    startup) to be wired in as ffmpeg input
-#    index 2 — see run_video()'s -i list.
-#
-# Sets globals: LABELS_CHAIN (filter string to
-# append), LABELS_OUT (bracketed output label
-# to continue the chain from, e.g. "[base]" if
-# no labels file exists, or the last label's
-# output node otherwise).
-#############################################
-build_labels_chain() {
-    local url="$1"
-    local base
-    base="${url##*/}"
-    base="${base%.*}"
-
-    LABELS_CHAIN=""
-    LABELS_OUT="[base]"
-
-    local labels_file="${base}.labels.txt"
-    if [ ! -f "$labels_file" ]; then
-        return 0
-    fi
-
-    # First pass: collect valid lines so we know the count up front
-    # (needed to size the marker `split` filter correctly).
-    local xs=() ys=() texts=()
-    while IFS=',' read -r x y text; do
-        x="$(echo "$x" | tr -d '[:space:]')"
-        y="$(echo "$y" | tr -d '[:space:]')"
-        text="$(echo "$text" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-        [[ "$x" =~ ^[0-9]+$ ]] || continue
-        [[ "$y" =~ ^[0-9]+$ ]] || continue
-        [ -z "$text" ] && continue
-        xs+=("$x"); ys+=("$y"); texts+=("$text")
-    done < "$labels_file"
-
-    local n=${#xs[@]}
-    if [ "$n" -eq 0 ]; then
-        echo "NOTICE: $labels_file had no valid lines — skipping labels for this video."
-        return 0
-    fi
-    echo "Using coordinate labels: $labels_file ($n label(s))"
-
-    local BOX_W=260
-    local BOX_H=42
-    local V_OFFSET=70
-    local H_OFFSET=40
-    local ACCENT_W=4
-
-    # Split the pre-rendered marker image (input [2:v]) into one copy per
-    # label so each can be overlaid independently at its own coordinate.
-    local split_outs=""
-    for ((i = 1; i <= n; i++)); do split_outs+="[dm${i}]"; done
-    LABELS_CHAIN+="[2:v]split=${n}${split_outs};"
-
-    local prev="base"
-    for ((i = 0; i < n; i++)); do
-        local idx=$((i + 1))
-        local x="${xs[$i]}" y="${ys[$i]}" text="${texts[$i]}"
-        printf '%s' "$text" > "$ASSET_DIR/label${idx}.txt"
-
-        local box_y=$((y - V_OFFSET))
-        if [ "$box_y" -lt 20 ]; then
-            box_y=$((y + V_OFFSET - BOX_H))
-        fi
-        local box_x=$((x + H_OFFSET))
-        if [ $((box_x + BOX_W)) -gt 1260 ]; then
-            box_x=$((x - H_OFFSET - BOX_W))
-        fi
-        [ "$box_x" -lt 0 ] && box_x=10
-
-        local seg_y_top seg_y_bot
-        if [ "$box_y" -gt "$y" ]; then
-            seg_y_top=$y; seg_y_bot=$box_y
-        else
-            seg_y_top=$box_y; seg_y_bot=$y
-        fi
-        local seg_h=$((seg_y_bot - seg_y_top))
-        [ "$seg_h" -lt 2 ] && seg_h=2
-
-        local h_left h_w
-        if [ "$box_x" -gt "$x" ]; then
-            h_left=$x; h_w=$((box_x - x))
-        else
-            h_left=$box_x; h_w=$((x - box_x))
-        fi
-        [ "$h_w" -lt 2 ] && h_w=2
-
-        local n1="lbl${idx}_dot" n2="lbl${idx}_v" n3="lbl${idx}_h" n4="lbl${idx}_bg" n5="lbl${idx}_bar" n6="lbl${idx}_outline" n7="lbl${idx}_txt"
-
-        # Gold-tinted connector line (right-angle: vertical then horizontal)
-        LABELS_CHAIN+="[${prev}]drawbox=x=${x}:y=${seg_y_top}:w=2:h=${seg_h}:color=${GOLD}@0.85:t=fill[${n2}];"
-        LABELS_CHAIN+="[${n2}]drawbox=x=${h_left}:y=${box_y}:w=${h_w}:h=2:color=${GOLD}@0.85:t=fill[${n3}];"
-        # Label box: dark fill + gold accent bar (left edge) + thin gold outline
-        LABELS_CHAIN+="[${n3}]drawbox=x=${box_x}:y=${box_y}:w=${BOX_W}:h=${BOX_H}:color=black@0.78:t=fill[${n4}];"
-        LABELS_CHAIN+="[${n4}]drawbox=x=${box_x}:y=${box_y}:w=${ACCENT_W}:h=${BOX_H}:color=${GOLD}:t=fill[${n5}];"
-        LABELS_CHAIN+="[${n5}]drawbox=x=${box_x}:y=${box_y}:w=${BOX_W}:h=${BOX_H}:color=${GOLD}@0.5:t=1[${n6}];"
-        LABELS_CHAIN+="[${n6}]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/label${idx}.txt:fontcolor=white:fontsize=18:x=$((box_x + ACCENT_W + 14)):y=$((box_y + (BOX_H - 18) / 2)):${SHADOW}[${n7}];"
-        # Circular gold-ring/white marker dot, overlaid on top of everything
-        LABELS_CHAIN+="[${n7}][dm${idx}]overlay=x=$((x - 8)):y=$((y - 8))[${n1}];"
-
-        prev="$n1"
-    done
-
-    LABELS_OUT="[${prev}]"
-    echo "Drew $n label(s) from $labels_file"
-}
-
-#############################################
-# prepare_video_content: (re)loads headlines +
-# facts for the video about to stream, and
-# rebuilds BASE_CHAIN / FACT_END to match.
-#
-# Per-video override: if files named
-#   <basename>.headlines.txt
-#   <basename>.facts.txt
-# exist (basename = video filename without
-# extension — same derivation used for the
-# up-next bumper title), they're used verbatim,
-# in the order given. Useful for curating panel
-# content to match a specific video.
-#
-# Otherwise falls back to the shared pool
-# (galaxy_info.txt / facts.txt / built-in
-# defaults), shuffled into a fresh random order
-# each video so the panel doesn't feel like a
-# static banner repeating identically on every
-# clip.
-#############################################
-prepare_video_content() {
-    local url="$1"
-    local base
-    base="${url##*/}"
-    base="${base%.*}"
-
-    RAW_LINES=()
-    if [ -f "${base}.headlines.txt" ]; then
-        echo "Using curated headlines: ${base}.headlines.txt"
-        while IFS= read -r line; do
-            [ -n "$(echo "$line" | tr -d '[:space:]')" ] && RAW_LINES+=("$line")
-        done < "${base}.headlines.txt"
-    fi
-    if [ "${#RAW_LINES[@]}" -eq 0 ]; then
-        local pool=()
-        if [ -f "$INFO_FILE" ]; then
-            while IFS= read -r line; do
-                [ -n "$(echo "$line" | tr -d '[:space:]')" ] && pool+=("$line")
-            done < "$INFO_FILE"
-        fi
-        [ "${#pool[@]}" -eq 0 ] && pool=("${DEFAULT_HEADLINES[@]}")
-        while IFS= read -r line; do
-            RAW_LINES+=("$line")
-        done < <(printf '%s\n' "${pool[@]}" | shuf)
-    fi
-
-    FACTS=()
-    if [ -f "${base}.facts.txt" ]; then
-        echo "Using curated facts: ${base}.facts.txt"
-        while IFS= read -r line; do
-            [ -n "$(echo "$line" | tr -d '[:space:]')" ] && FACTS+=("$line")
-        done < "${base}.facts.txt"
-    fi
-    if [ "${#FACTS[@]}" -eq 0 ]; then
-        local fpool=()
-        if [ -f "facts.txt" ]; then
-            while IFS= read -r line; do
-                [ -n "$(echo "$line" | tr -d '[:space:]')" ] && fpool+=("$line")
-            done < "facts.txt"
-        fi
-        [ "${#fpool[@]}" -eq 0 ] && fpool=("${DEFAULT_FACTS[@]}")
-        while IFS= read -r line; do
-            FACTS+=("$line")
-        done < <(printf '%s\n' "${fpool[@]}" | shuf)
-    fi
-
-    N=${#RAW_LINES[@]}
-    CYCLE=$((N * SLOT))
-    echo "This video: $N headline(s), rotation cycle ${CYCLE}s"
-
-    for i in "${!RAW_LINES[@]}"; do
-        idx=$((i + 1))
-        echo "${RAW_LINES[$i]}" | fold -s -w 25 > "$ASSET_DIR/headline${idx}.txt"
-    done
-
-    MAX_HEADLINE_LINES=1
-    for i in "${!RAW_LINES[@]}"; do
-        idx=$((i + 1))
-        lines=$(grep -c '' "$ASSET_DIR/headline${idx}.txt")
-        [ "$lines" -gt "$MAX_HEADLINE_LINES" ] && MAX_HEADLINE_LINES=$lines
-    done
-    echo "Longest headline wraps to $MAX_HEADLINE_LINES line(s)."
-
-    HEADLINE_Y=230
-    PROGRESS_Y=$((HEADLINE_Y + MAX_HEADLINE_LINES * HEADLINE_LINE_H + 12))
-    DOTS_Y=$((PROGRESS_Y + 20))
-    FACT_DIVIDER_Y=$((DOTS_Y + 40))
-    FACT_LABEL_Y=$((FACT_DIVIDER_Y + 14))
-    FACT_TEXT_Y=$((FACT_LABEL_Y + 20))
-
-    TICKER_STRING=""
-    for i in "${!RAW_LINES[@]}"; do
-        TICKER_STRING+="${RAW_LINES[$i]}     •     "
-    done
-    printf '%s' "$TICKER_STRING" > "$ASSET_DIR/ticker.txt"
-
-    FACT_N=${#FACTS[@]}
-    FACT_CYCLE=$((FACT_N * FACT_SLOT))
-    for i in "${!FACTS[@]}"; do
-        idx=$((i + 1))
-        echo "${FACTS[$i]}" | fold -s -w 23 > "$ASSET_DIR/fact${idx}.txt"
-    done
-
-    #########################################
-    # Rebuild BASE_CHAIN for this video's content
-    #########################################
-    CHAIN="[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:black[video];"
-    CHAIN+="[1:v]scale=1280:720:flags=fast_bilinear[ovl];"
-    CHAIN+="[ovl][video]overlay=0:0[base];"
-
-    # Optional coordinate-based callout labels for this video, drawn onto
-    # the raw video before the panel/UI so the panel stays on top.
-    build_labels_chain "$url"
-    CHAIN+="$LABELS_CHAIN"
-
-    CHAIN+="${LABELS_OUT}drawbox=x=0:y=0:w=333:h=720:color=black@0.60:t=fill[p1];"
-    CHAIN+="[p1]drawbox=x=333:y=0:w=4:h=720:color=black@0.45:t=fill[p2];"
-    CHAIN+="[p2]drawbox=x=337:y=0:w=4:h=720:color=black@0.30:t=fill[p3];"
-    CHAIN+="[p3]drawbox=x=341:y=0:w=4:h=720:color=black@0.15:t=fill[p4];"
-    CHAIN+="[p4]drawbox=x=0:y=0:w=347:h=4:color=${GOLD}@0.9:t=fill[p5];"
-    CHAIN+="[p5]drawbox=x=345:y=0:w=2:h=720:color=${GOLD}@0.6:t=fill[p6];"
-
-    CHAIN+="[p6]drawbox=x=27:y=28:w=11:h=11:color=${RED}:t=fill:enable='lt(mod(t\,1)\,0.6)'[p7];"
-    CHAIN+="[p7]drawtext=fontfile=${FONT}:text='LIVE':fontcolor=white:fontsize=30:x=44:y=19[p8];"
-
-    CHAIN+="[p8]drawtext=fontfile=${FONT}:text='Credits\: NASA':fontcolor=white@0.85:fontsize=15:x=313-text_w:y=19[p9];"
-    CHAIN+="[p9]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/clock.txt:reload=1:fontcolor=${GOLD}:fontsize=14:x=313-text_w:y=39[p10];"
-    CHAIN+="[p10]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/subs.txt:reload=1:fontcolor=white@0.75:fontsize=13:x=313-text_w:y=57[p10b];"
-    CHAIN+="[p10b]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/viewers.txt:reload=1:fontcolor=white@0.75:fontsize=13:x=313-text_w:y=75[p10c];"
-
-    CHAIN+="[p10c]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/title1.txt:fontcolor=white:fontsize=23:x=33:y=95:${SHADOW}[p11];"
-    CHAIN+="[p11]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/title2.txt:fontcolor=white@0.85:fontsize=17:x=33:y=124:${SHADOW}[p12];"
-    CHAIN+="[p12]drawbox=x=33:y=155:w=280:h=2:color=white@0.3:t=fill[p13];"
-
-    CHAIN+="[p13]drawbox=x=33:y=171:w=8:h=8:color=${GOLD}:t=fill[p14];"
-    CHAIN+="[p14]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/header.txt:fontcolor=${GOLD}:fontsize=15:x=49:y=168[p15];"
-
-    CHAIN+="[p15]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/eyebrow.txt:fontcolor=${GOLD}@0.85:fontsize=12:x=33:y=210[p16];"
-
-    local prev="p16"
-    for i in "${!RAW_LINES[@]}"; do
-        idx=$((i + 1))
-        local start=$((i * SLOT))
-        local end=$((start + SLOT))
-        local nxt="h${idx}"
-        local ALPHA="if(between(mod(t\,${CYCLE})\,${start}\,${end})\,if(lt(mod(t\,${CYCLE})-${start}\,0.6)\,(mod(t\,${CYCLE})-${start})/0.6\,if(gt(mod(t\,${CYCLE})-${start}\,${SLOT}-0.6)\,(${end}-mod(t\,${CYCLE}))/0.6\,1))\,0)"
-        CHAIN+="[${prev}]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/headline${idx}.txt:fontcolor=white:fontsize=${HEADLINE_FONTSIZE}:line_spacing=${HEADLINE_LINE_SPACING}:x=33:y=${HEADLINE_Y}:alpha='${ALPHA}':${SHADOW}[${nxt}];"
-        prev="$nxt"
-    done
-
-    CHAIN+="[${prev}]drawbox=x=33:y=${PROGRESS_Y}:w=280:h=2:color=white@0.15:t=fill[pg1];"
-    CHAIN+="[pg1]drawbox=x=33:y=${PROGRESS_Y}:w='280*(mod(t\,${SLOT}))/${SLOT}':h=2:color=${GOLD}:t=fill[pg2];"
-    prev="pg2"
-
-    for i in "${!RAW_LINES[@]}"; do
-        idx=$((i + 1))
-        local x=$((33 + i * 17))
-        local nxt="db${idx}"
-        CHAIN+="[${prev}]drawbox=x=${x}:y=${DOTS_Y}:w=7:h=7:color=white@0.3:t=fill[${nxt}];"
-        prev="$nxt"
-    done
-
-    local last=$((N - 1))
-    for i in "${!RAW_LINES[@]}"; do
-        idx=$((i + 1))
-        local x=$((33 + i * 17))
-        local start=$((i * SLOT))
-        local end=$((start + SLOT))
-        local ENABLE="between(mod(t\,${CYCLE})\,${start}\,${end})"
-        if [ "$i" -eq "$last" ]; then
-            CHAIN+="[${prev}]drawbox=x=${x}:y=${DOTS_Y}:w=7:h=7:color=${GOLD}:t=fill:enable='${ENABLE}'[pdotend];"
-            prev="pdotend"
-        else
-            local nxt="da${idx}"
-            CHAIN+="[${prev}]drawbox=x=${x}:y=${DOTS_Y}:w=7:h=7:color=${GOLD}:t=fill:enable='${ENABLE}'[${nxt}];"
-            prev="$nxt"
-        fi
-    done
-
-    CHAIN+="[${prev}]drawbox=x=33:y=${FACT_DIVIDER_Y}:w=280:h=2:color=${GOLD}@0.4:t=fill[fp1];"
-    CHAIN+="[fp1]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/fact_label.txt:fontcolor=${GOLD}@0.85:fontsize=12:x=33:y=${FACT_LABEL_Y}[fp2];"
-    prev="fp2"
-    for i in "${!FACTS[@]}"; do
-        idx=$((i + 1))
-        local start=$((i * FACT_SLOT))
-        local end=$((start + FACT_SLOT))
-        local nxt="f${idx}"
-        local FALPHA="if(between(mod(t\,${FACT_CYCLE})\,${start}\,${end})\,if(lt(mod(t\,${FACT_CYCLE})-${start}\,0.6)\,(mod(t\,${FACT_CYCLE})-${start})/0.6\,if(gt(mod(t\,${FACT_CYCLE})-${start}\,${FACT_SLOT}-0.6)\,(${end}-mod(t\,${FACT_CYCLE}))/0.6\,1))\,0)"
-        CHAIN+="[${prev}]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/fact${idx}.txt:fontcolor=white@0.9:fontsize=16:line_spacing=7:x=33:y=${FACT_TEXT_Y}:alpha='${FALPHA}'[${nxt}];"
-        prev="$nxt"
-    done
-
-    BASE_CHAIN="$CHAIN"
-    FACT_END="$prev"
-}
-
-#############################################
-# build_final_filter: appends the CTA / next-
-# video countdown / ticker / watermark / border
-# section onto BASE_CHAIN. Called fresh for each
-# video since the countdown depends on that
-# video's probed duration.
-#############################################
-build_final_filter() {
-    local total_duration="$1"
-    local tail="$BASE_CHAIN"
-
-    local CTA_CYCLE=240
+build_full_filter() {
+    local n_slides="$1"
+    local FACT_CYCLE=$((FACT_N * FACT_SLOT))
+    local CTA_CYCLE=180
     local CTA_SHOW=8
-    local CTA_ALPHA="if(between(mod(t\,${CTA_CYCLE})\,0\,${CTA_SHOW})\,if(lt(mod(t\,${CTA_CYCLE})\,0.6)\,mod(t\,${CTA_CYCLE})/0.6\,if(gt(mod(t\,${CTA_CYCLE})\,${CTA_SHOW}-0.6)\,(${CTA_SHOW}-mod(t\,${CTA_CYCLE}))/0.6\,1))\,0)"
+
+    build_slideshow_filter "$n_slides"
+
+    local F=""
+    F+="$SLIDESHOW_FILTER"
+    F+="[${OVERLAY_INPUT_IDX}:v]scale=1280:720:flags=fast_bilinear[ovl];"
+    F+="[ovl][${SLIDESHOW_LABEL}]overlay=0:0[base];"
+
+    build_slide_info_chain "$n_slides"
+    F+="$SLIDE_INFO_CHAIN"
+    local prev="$SLIDE_INFO_END"
+
+    F+="[${prev}]drawbox=x=0:y=0:w=333:h=720:color=0x05080C@0.72:t=fill[p1];"
+    F+="[p1]drawbox=x=333:y=0:w=4:h=720:color=black@0.45:t=fill[p2];"
+    F+="[p2]drawbox=x=337:y=0:w=4:h=720:color=black@0.30:t=fill[p3];"
+    F+="[p3]drawbox=x=341:y=0:w=4:h=720:color=black@0.15:t=fill[p4];"
+    F+="[p4]drawbox=x=0:y=0:w=347:h=4:color=${MARS_RED}@0.9:t=fill[p5];"
+    F+="[p5]drawbox=x=345:y=0:w=2:h=720:color=${MARS_RED}@0.6:t=fill[p6];"
+
+    F+="[p6]drawbox=x=27:y=28:w=11:h=11:color=${RED}:t=fill:enable='lt(mod(t\,1)\,0.6)'[p7];"
+    F+="[p7]drawtext=fontfile=${FONT}:expansion=none:text='LIVE':fontcolor=white:fontsize=30:x=44:y=19[p8];"
+
+    F+="[p8]drawtext=fontfile=${FONT}:expansion=none:text='Credits\: NASA/JPL-Caltech':fontcolor=white@0.85:fontsize=13:x=313-text_w:y=19[p9];"
+    F+="[p9]drawtext=fontfile=${FONT}:expansion=none:textfile=${ASSET_DIR}/clock.txt:reload=1:fontcolor=${GOLD}:fontsize=13:x=313-text_w:y=37[p10];"
+    F+="[p10]drawtext=fontfile=${FONT}:expansion=none:textfile=${ASSET_DIR}/subs.txt:reload=1:fontcolor=white@0.75:fontsize=12:x=313-text_w:y=55[p10b];"
+    F+="[p10b]drawtext=fontfile=${FONT}:expansion=none:textfile=${ASSET_DIR}/viewers.txt:reload=1:fontcolor=white@0.75:fontsize=12:x=313-text_w:y=72[p10c];"
+
+    F+="[p10c]drawtext=fontfile=${FONT}:expansion=none:textfile=${ASSET_DIR}/title1.txt:fontcolor=${MARS_RED}:fontsize=26:x=33:y=95:${SHADOW}[p11];"
+    F+="[p11]drawtext=fontfile=${FONT}:expansion=none:textfile=${ASSET_DIR}/title2.txt:fontcolor=white@0.90:fontsize=15:x=33:y=127:${SHADOW}[p12];"
+    F+="[p12]drawbox=x=33:y=157:w=280:h=2:color=white@0.3:t=fill[p13];"
+
+    F+="[p13]drawbox=x=33:y=171:w=10:h=10:color=${MARS_RED}:t=fill[p14];"
+    F+="[p14]drawtext=fontfile=${FONT}:expansion=none:textfile=${ASSET_DIR}/header.txt:fontcolor=${GOLD}:fontsize=14:x=50:y=169[p15];"
+    F+="[p15]drawtext=fontfile=${FONT}:expansion=none:textfile=${ASSET_DIR}/eyebrow.txt:fontcolor=${MARS_RED}@0.90:fontsize=12:x=33:y=198[p16];"
+
+    local SLIDE_CYCLE=$((n_slides * SLIDE_DURATION))
+    F+="[p16]drawtext=fontfile=${FONT}:expansion=none:text='IMAGE GALLERY':fontcolor=white@0.35:fontsize=9:x=33:y=225[pgcap];"
+    F+="[pgcap]drawbox=x=33:y=238:w=280:h=3:color=white@0.15:t=fill[pg1];"
+    F+="[pg1]drawbox=x=33:y=238:w='280*(mod(t\,${SLIDE_DURATION}))/${SLIDE_DURATION}':h=3:color=${MARS_RED}:t=fill[pg2];"
+
+    local prev2="pg2"
+    local max_dots=10
+    local dot_n=$((n_slides < max_dots ? n_slides : max_dots))
+    for ((i = 0; i < dot_n; i++)); do
+        local dot_x=$((33 + i * 26))
+        local nxt="db$((i+1))"
+        F+="[${prev2}]drawbox=x=${dot_x}:y=252:w=9:h=9:color=white@0.25:t=fill[${nxt}];"
+        prev2="$nxt"
+    done
+    for ((i = 0; i < dot_n; i++)); do
+        local dot_x=$((33 + i * 26))
+        local start=$((i * SLIDE_DURATION))
+        local end=$((start + SLIDE_DURATION))
+        local ENABLE="between(mod(t\,${SLIDE_CYCLE})\,${start}\,${end})"
+        local nxt="da$((i+1))"
+        F+="[${prev2}]drawbox=x=${dot_x}:y=252:w=9:h=9:color=${MARS_RED}:t=fill:enable='${ENABLE}'[${nxt}];"
+        prev2="$nxt"
+    done
+
+    F+="[${prev2}]drawbox=x=33:y=282:w=280:h=2:color=${MARS_RED}@0.5:t=fill[fp0];"
+    F+="[fp0]drawbox=x=33:y=289:w=8:h=8:color=${GOLD}:t=fill[fp0b];"
+    F+="[fp0b]drawtext=fontfile=${FONT}:expansion=none:textfile=${ASSET_DIR}/fact_label.txt:fontcolor=${GOLD}@0.90:fontsize=12:x=49:y=290[fp1];"
+    local fp_prev="fp1"
+    for ((i = 0; i < FACT_N; i++)); do
+        local fidx=$((i + 1))
+        local fstart=$((i * FACT_SLOT))
+        local fend=$((fstart + FACT_SLOT))
+        local nxt="f${fidx}"
+        local FALPHA="if(between(mod(t\,${FACT_CYCLE})\,${fstart}\,${fend})\,if(lt(mod(t\,${FACT_CYCLE})-${fstart}\,0.5)\,(mod(t\,${FACT_CYCLE})-${fstart})/0.5\,if(gt(mod(t\,${FACT_CYCLE})-${fstart}\,${FACT_SLOT}-0.5)\,(${fend}-mod(t\,${FACT_CYCLE}))/0.5\,1))\,0)"
+        F+="[${fp_prev}]drawtext=fontfile=${FONT}:expansion=none:textfile=${ASSET_DIR}/fact${fidx}.txt:fontcolor=white@0.90:fontsize=16:line_spacing=7:x=33:y=318:alpha='${FALPHA}'[${nxt}];"
+        fp_prev="$nxt"
+    done
+
+    # --- Live Telemetry panel (fills the gap under the Mars Fact box) ---
+    F+="[${fp_prev}]drawbox=x=10:y=415:w=326:h=135:color=black@0.45:t=fill[tl0];"
+    F+="[tl0]drawbox=x=10:y=415:w=5:h=135:color=${GOLD}:t=fill[tl1];"
+    F+="[tl1]drawtext=fontfile=${FONT}:expansion=none:text='LIVE TELEMETRY':fontcolor=${GOLD}:fontsize=11:x=22:y=422[tl2];"
+
+    F+="[tl2]drawtext=fontfile=${FONT}:expansion=none:text='TEMP\:':fontcolor=white@0.70:fontsize=12:x=22:y=441[tl3];"
+    F+="[tl3]drawtext=fontfile=${FONT}:expansion=none:textfile=${ASSET_DIR}/temp.txt:reload=1:fontcolor=${MARS_RED}:fontsize=13:x=68:y=440[tl4];"
+    F+="[tl4]drawtext=fontfile=${FONT}:expansion=none:text='WIND\:':fontcolor=white@0.70:fontsize=12:x=180:y=441[tl5];"
+    F+="[tl5]drawtext=fontfile=${FONT}:expansion=none:textfile=${ASSET_DIR}/wind.txt:reload=1:fontcolor=white@0.90:fontsize=13:x=228:y=440[tl6];"
+
+    F+="[tl6]drawtext=fontfile=${FONT}:expansion=none:text='PRESSURE\:':fontcolor=white@0.70:fontsize=12:x=22:y=459[tl7];"
+    F+="[tl7]drawtext=fontfile=${FONT}:expansion=none:textfile=${ASSET_DIR}/pressure.txt:reload=1:fontcolor=white@0.90:fontsize=13:x=100:y=458[tl8];"
+    F+="[tl8]drawbox=x=180:y=460:w=8:h=8:color=0x3DDC84:t=fill:enable='lt(mod(t\,3)\,2.5)'[tl9];"
+    F+="[tl9]drawtext=fontfile=${FONT}:expansion=none:text='SIGNAL LOCKED':fontcolor=white@0.85:fontsize=12:x=194:y=459[tl10];"
+
+    F+="[tl10]drawtext=fontfile=${FONT}:expansion=none:text='LOC\:':fontcolor=white@0.70:fontsize=12:x=22:y=477[tl11];"
+    F+="[tl11]drawtext=fontfile=${FONT}:expansion=none:textfile=${ASSET_DIR}/location.txt:reload=1:fontcolor=white@0.90:fontsize=12:x=58:y=477[tl12];"
+
+    F+="[tl12]drawtext=fontfile=${FONT}:expansion=none:textfile=${ASSET_DIR}/timeonmars.txt:reload=1:fontcolor=${GOLD}@0.90:fontsize=12:x=22:y=495[tl13];"
+
+    local STATUS_CYCLE=$((STATUS_N * STATUS_SLOT))
+    F+="[tl13]drawbox=x=22:y=513:w=9:h=9:color=0x3DDC84:t=fill:enable='lt(mod(t\,2)\,1.6)'[tl14];"
+    F+="[tl14]drawtext=fontfile=${FONT}:expansion=none:text='STATUS\:':fontcolor=white@0.70:fontsize=11:x=38:y=513[tl15];"
+    local st_prev="tl15"
+    for ((i = 0; i < STATUS_N; i++)); do
+        local sidx=$((i + 1))
+        local sstart=$((i * STATUS_SLOT))
+        local send=$((sstart + STATUS_SLOT))
+        local nxt="st${sidx}"
+        local SALPHA="if(between(mod(t\,${STATUS_CYCLE})\,${sstart}\,${send})\,if(lt(mod(t\,${STATUS_CYCLE})-${sstart}\,0.4)\,(mod(t\,${STATUS_CYCLE})-${sstart})/0.4\,if(gt(mod(t\,${STATUS_CYCLE})-${sstart}\,${STATUS_SLOT}-0.4)\,(${send}-mod(t\,${STATUS_CYCLE}))/0.4\,1))\,0)"
+        F+="[${st_prev}]drawtext=fontfile=${FONT}:expansion=none:textfile=${ASSET_DIR}/status${sidx}.txt:fontcolor=white@0.92:fontsize=11:x=86:y=513:alpha='${SALPHA}'[${nxt}];"
+        st_prev="$nxt"
+    done
+
+    F+="[${st_prev}]drawtext=fontfile=${FONT}:expansion=none:text='POWER\:':fontcolor=white@0.70:fontsize=11:x=22:y=534[tlp1];"
+    F+="[tlp1]drawbox=x=70:y=532:w=110:h=9:color=white@0.15:t=fill[tlp2];"
+    F+="[tlp2]drawbox=x=70:y=532:w='110*(0.80+0.10*sin(t/6))':h=9:color=0x3DDC84:t=fill[tlp3];"
+    F+="[tlp3]drawbox=x=70:y=532:w=110:h=9:color=white@0.35:t=2[tlp4];"
+    F+="[tlp4]drawtext=fontfile=${FONT}:expansion=none:text='RTG STABLE':fontcolor=white@0.55:fontsize=10:x=186:y=533[tel_end];"
+
+    F+="[tel_end]drawbox=x=10:y=560:w=326:h=115:color=black@0.45:t=fill[mi0];"
+    F+="[mi0]drawbox=x=10:y=560:w=5:h=115:color=${MARS_RED}:t=fill[mi1];"
+    F+="[mi1]drawtext=fontfile=${FONT}:expansion=none:text='MISSION STATS':fontcolor=${GOLD}:fontsize=11:x=22:y=567[mi2];"
+    F+="[mi2]drawtext=fontfile=${FONT}:expansion=none:text='Rover\: Perseverance (Percy)':fontcolor=white@0.85:fontsize=13:x=22:y=585[mi3];"
+    F+="[mi3]drawtext=fontfile=${FONT}:expansion=none:text='Landing\: Feb 18\, 2021':fontcolor=white@0.85:fontsize=13:x=22:y=602[mi4];"
+    F+="[mi4]drawtext=fontfile=${FONT}:expansion=none:text='Location\: Jezero Crater':fontcolor=white@0.85:fontsize=13:x=22:y=619[mi5];"
+    F+="[mi5]drawtext=fontfile=${FONT}:expansion=none:text='Sol\: ${CURRENT_SOL}':fontcolor=${MARS_RED}:fontsize=15:x=22:y=638[mi6];"
+    F+="[mi6]drawtext=fontfile=${FONT}:expansion=none:text='Images\: ${DOWNLOAD_COUNT} captured today':fontcolor=white@0.75:fontsize=12:x=22:y=659[mi7];"
+
+    local CTA_ALPHA="if(between(mod(t\,${CTA_CYCLE})\,0\,${CTA_SHOW})\,if(lt(mod(t\,${CTA_CYCLE})\,0.5)\,mod(t\,${CTA_CYCLE})/0.5\,if(gt(mod(t\,${CTA_CYCLE})\,${CTA_SHOW}-0.5)\,(${CTA_SHOW}-mod(t\,${CTA_CYCLE}))/0.5\,1))\,0)"
     local CTA_ENABLE="between(mod(t\,${CTA_CYCLE})\,0\,${CTA_SHOW})"
-    local COUNTDOWN_ENABLE="not(${CTA_ENABLE})"
+    F+="[mi7]drawbox=x=733:y=620:w=507:h=43:color=black@0.75:t=fill[cta_bg];"
+    F+="[cta_bg]drawbox=x=733:y=620:w=4:h=43:color=${MARS_RED}:t=fill[cta_bar];"
+    F+="[cta_bar]drawbox=x=755:y=636:w=11:h=11:color=${RED}:t=fill:enable='${CTA_ENABLE}'[cta_dot];"
+    F+="[cta_dot]drawtext=fontfile=${FONT}:expansion=none:textfile=${ASSET_DIR}/cta.txt:fontcolor=white:fontsize=19:x=773:y=633:alpha='${CTA_ALPHA}'[cta_sub];"
+    F+="[cta_sub]drawtext=fontfile=${FONT}:expansion=none:text='Images refresh each Sol':fontcolor=white@0.80:fontsize=19:x=773:y=633:enable='not(${CTA_ENABLE})'[cta_final];"
 
-    tail+="[${FACT_END}]drawbox=x=733:y=620:w=507:h=43:color=black@0.75:t=fill[cta_bg];"
-    tail+="[cta_bg]drawbox=x=733:y=620:w=4:h=43:color=${GOLD}:t=fill[cta_bar];"
-    tail+="[cta_bar]drawbox=x=755:y=636:w=11:h=11:color=${RED}:t=fill:enable='${CTA_ENABLE}'[cta_dot];"
-    tail+="[cta_dot]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/cta.txt:fontcolor=white:fontsize=19:x=773:y=633:alpha='${CTA_ALPHA}'[cta_sub];"
+    F+="[cta_final]drawbox=x=0:y=680:w=1280:h=40:color=black@0.72:t=fill[tk1];"
+    F+="[tk1]drawbox=x=0:y=680:w=1280:h=2:color=${MARS_RED}@0.9:t=fill[tk2];"
+    F+="[tk2]drawtext=fontfile=${FONT}:expansion=none:textfile=${ASSET_DIR}/ticker.txt:fontcolor=white:fontsize=17:borderw=2:bordercolor=black@0.6:y=695:x='w-mod(t*${TICKER_SPEED}\,text_w+w)'[tk3];"
+    F+="[tk3]drawbox=x=0:y=680:w=130:h=40:color=black@0.85:t=fill[tk4];"
+    F+="[tk4]drawbox=x=0:y=682:w=123:h=38:color=${MARS_RED}:t=fill[tk5];"
+    F+="[tk5]drawtext=fontfile=${FONT}:expansion=none:text='MARS LIVE':fontcolor=white:fontsize=14:x=12:y=695[tk6];"
 
-    if [[ "$total_duration" =~ ^[0-9]+$ ]] && [ "$total_duration" -gt 0 ]; then
-        tail+="[cta_sub]drawtext=fontfile=${FONT}:text='Next video in %{eif\:max(${total_duration}-t\,0)\:d}s':fontcolor=white:fontsize=19:x=773:y=633:enable='${COUNTDOWN_ENABLE}'[cta_final];"
-    else
-        tail+="[cta_sub]drawtext=fontfile=${FONT}:text='Coming up next...':fontcolor=white@0.85:fontsize=19:x=773:y=633:enable='${COUNTDOWN_ENABLE}'[cta_final];"
-    fi
+    F+="[tk6]drawbox=x=345:y=648:w=360:h=20:color=black@0.30:t=fill[wmbg];"
+    F+="[wmbg]drawtext=fontfile=${FONT}:expansion=none:text='${CHANNEL_NAME}':fontcolor=white@0.55:fontsize=15:borderw=1.5:bordercolor=black@0.7:x=353:y=655[wm1];"
 
-    tail+="[cta_final]drawbox=x=0:y=680:w=1280:h=40:color=black@0.72:t=fill[tk1];"
-    tail+="[tk1]drawbox=x=0:y=680:w=1280:h=2:color=${GOLD}@0.9:t=fill[tk2];"
-    tail+="[tk2]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/ticker.txt:fontcolor=white:fontsize=17:borderw=2:bordercolor=black@0.6:y=695:x='w-mod(t*${TICKER_SPEED}\,text_w+w)'[tk3];"
-    tail+="[tk3]drawbox=x=0:y=680:w=120:h=40:color=black@0.85:t=fill[tk4];"
-    tail+="[tk4]drawbox=x=0:y=682:w=113:h=38:color=${GOLD}:t=fill[tk5];"
-    tail+="[tk5]drawtext=fontfile=${FONT}:text='BULLETIN':fontcolor=black:fontsize=16:x=17:y=695[tk6];"
+    local SUB_PULSE_ENABLE="lt(mod(t\,3)\,1)"
+    local sub_ring_x=$((SUB_ICON_X - SUB_ICON_R))
+    local sub_ring_y=$((SUB_ICON_Y - SUB_ICON_R))
+    local sub_ring_d=$((SUB_ICON_R * 2))
+    F+="[wm1]drawbox=x=${sub_ring_x}:y=${sub_ring_y}:w=${sub_ring_d}:h=${sub_ring_d}:color=${GOLD}@0.9:t=3:enable='${SUB_PULSE_ENABLE}'[wm2];"
 
-    tail+="[tk6]drawtext=fontfile=${FONT}:text='${CHANNEL_NAME}':fontcolor=white@0.45:fontsize=15:borderw=1.5:bordercolor=black@0.7:x=353:y=655[wm1];"
+    F+="[wm2]drawbox=x=0:y=0:w=1280:h=720:color=black@0.5:t=2[final]"
 
-    tail+="[wm1]drawbox=x=0:y=0:w=1280:h=720:color=black@0.5:t=2[final]"
-
-    echo "$tail"
+    echo "$F"
 }
 
 #############################################
-# Up-next bumper: short branded title card
-# streamed between videos to reduce drop-off
-# at the loop/transition point.
+# Stream the slideshow to YouTube
 #############################################
-run_bumper() {
-    local next_url="$1"
-
-    local raw title
-    raw="${next_url##*/}"
-    raw="${raw%.*}"
-    raw="${raw//[-_]/ }"
-    raw="$(echo "$raw" | tr -d '[:space:]')"
-    if [ -z "$raw" ] || [ ${#raw} -lt 3 ]; then
-        title="A New Discovery"
-    else
-        raw="${next_url##*/}"
-        raw="${raw%.*}"
-        raw="${raw//[-_]/ }"
-        title=$(echo "$raw" | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) substr($i,2); print}')
-    fi
-
-    local sub_idx=$((RANDOM % ${#BUMPER_MESSAGES[@]}))
-    printf '%s' "$title" | fold -s -w 34 > "$ASSET_DIR/bumper_title.txt"
-    printf '%s' "${BUMPER_MESSAGES[$sub_idx]}" > "$ASSET_DIR/bumper_sub.txt"
-
-    echo ">>> Up next: $title"
-
-    local fade_out_start
-    fade_out_start=$(awk -v d="$BUMPER_DURATION" 'BEGIN{print d - 0.6}')
-
-    local BFILTER
-    BFILTER="[0:v]scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720[bg];"
-    BFILTER+="[bg]drawbox=x=0:y=0:w=1280:h=720:color=black@0.55:t=fill[b1];"
-    BFILTER+="[b1]drawbox=x=27:y=28:w=11:h=11:color=${RED}:t=fill:enable='lt(mod(t\,1)\,0.6)'[b2];"
-    BFILTER+="[b2]drawtext=fontfile=${FONT}:text='LIVE':fontcolor=white:fontsize=30:x=44:y=19[b3];"
-    BFILTER+="[b3]drawbox=x=0:y=313:w=1280:h=2:color=${GOLD}@0.8:t=fill[b4];"
-    BFILTER+="[b4]drawtext=fontfile=${FONT}:text='UP NEXT':fontcolor=${GOLD}:fontsize=22:x=(w-text_w)/2:y=260[b5];"
-    BFILTER+="[b5]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/bumper_title.txt:fontcolor=white:fontsize=36:line_spacing=8:x=(w-text_w)/2:y=347:${SHADOW}[b6];"
-    BFILTER+="[b6]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/bumper_sub.txt:fontcolor=white@0.75:fontsize=18:x=(w-text_w)/2:y=427[b7];"
-    BFILTER+="[b7]drawtext=fontfile=${FONT}:text='${CHANNEL_NAME}':fontcolor=white@0.4:fontsize=14:x=(w-text_w)/2:y=470[b8];"
-    BFILTER+="[b8]fade=t=in:st=0:d=0.5,fade=t=out:st=${fade_out_start}:d=0.6[final]"
-
-    ffmpeg \
-    -hide_banner \
-    -loglevel warning \
-    -loop 1 -t "$BUMPER_DURATION" -i overlay.png \
-    -f lavfi -t "$BUMPER_DURATION" -i anullsrc=r=48000:cl=stereo \
-    -filter_complex "$BFILTER" \
-    -map "[final]" \
-    -map 1:a \
-    -r 24 \
-    -s 1280x720 \
-    -c:v libx264 \
-    -preset ultrafast \
-    -tune zerolatency \
-    -threads 2 \
-    -profile:v high \
-    -level 4.1 \
-    -pix_fmt yuv420p \
-    -b:v 3000k \
-    -maxrate 3000k \
-    -bufsize 6000k \
-    -g 60 \
-    -keyint_min 60 \
-    -sc_threshold 0 \
-    -c:a aac \
-    -b:a 128k \
-    -ar 48000 \
-    -ac 2 \
-    -f flv \
-    "rtmp://a.rtmp.youtube.com/live2/${YOUTUBE_STREAM_KEY}" || echo "WARNING: bumper failed, continuing to next video"
-}
-
-#############################################
-# Stream one video with automatic retry on
-# failure/crash (e.g. Bus error, network drop),
-# instead of letting set -e kill the script.
-#############################################
-run_video() {
-    local url="$1"
+run_stream() {
+    local n_slides="$1"
     local attempt=1
 
-    # Load headlines/facts tied to this specific video (curated file if
-    # present, otherwise a freshly shuffled pool) and rebuild the panel
-    # filter chain to match.
-    prepare_video_content "$url"
-
-    # Probe actual duration so the CTA box can show a real countdown to
-    # the next video. Falls back gracefully if probing fails.
-    local duration
-    duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$url" 2>/dev/null || echo "")
-    duration=${duration%.*}
-    [[ "$duration" =~ ^[0-9]+$ ]] || duration=""
-    if [ -n "$duration" ]; then
-        echo "Probed duration: ${duration}s"
-    else
-        echo "Could not probe duration — countdown will show generic filler text."
+    build_image_array
+    if [ "${#IMAGE_FILES[@]}" -ne "$n_slides" ]; then
+        echo "WARNING: image array (${#IMAGE_FILES[@]}) doesn't match slide count ($n_slides) — resyncing."
+        n_slides=${#IMAGE_FILES[@]}
+    fi
+    if [ "$n_slides" -eq 0 ]; then
+        echo "ERROR: no images to stream."
+        return 1
     fi
 
+    OVERLAY_INPUT_IDX=$n_slides
+    AUDIO_INPUT_IDX=$((n_slides + 1))
+
     local filter
-    filter=$(build_final_filter "$duration")
+    filter=$(build_full_filter "$n_slides")
+
+    # With ~300 images the filter graph (zoompans + xfades + overlay text)
+    # can easily exceed the OS's ~128KB single-argument limit, causing
+    # ffmpeg to fail immediately with "Argument list too long" (E2BIG).
+    # Writing it to a file and using -filter_complex_script avoids that
+    # entirely, since only a short file path goes on the command line.
+    local filter_script="$ASSET_DIR/filter_complex.txt"
+    printf '%s' "$filter" > "$filter_script"
+
+    # Each image is its own ffmpeg input (index 0..n-1) so it can get its
+    # own Ken Burns zoompan before being cross-faded into the next one.
+    local INPUT_ARGS=()
+    local f
+    for f in "${IMAGE_FILES[@]}"; do
+        INPUT_ARGS+=(-loop 1 -i "$f")
+    done
+    INPUT_ARGS+=(-loop 1 -i overlay.png)
+
+    if [ "$HAVE_MUSIC" = true ]; then
+        INPUT_ARGS+=(-stream_loop -1 -re -i "$MUSIC_FILE")
+    else
+        INPUT_ARGS+=(-f lavfi -i anullsrc=r=48000:cl=stereo)
+    fi
 
     while [ "$attempt" -le "$MAX_RETRIES" ]; do
         echo "----------------------------------------"
-        echo "Streaming (attempt ${attempt}/${MAX_RETRIES}):"
-        echo "$url"
+        echo "Streaming Sol $CURRENT_SOL ($n_slides slides, Ken Burns + crossfades, music=${HAVE_MUSIC}) — attempt ${attempt}/${MAX_RETRIES}"
         echo "----------------------------------------"
-
         set +e
         ffmpeg \
         -hide_banner \
         -loglevel info \
-        -re \
-        -i "$url" \
-        -loop 1 -i overlay.png \
-        -loop 1 -i "$DOT_MARKER" \
-        -filter_complex "$filter" \
+        "${INPUT_ARGS[@]}" \
+        -filter_complex_script "$filter_script" \
         -map "[final]" \
-        -map 0:a? \
+        -map "${AUDIO_INPUT_IDX}:a" \
         -r 30 \
         -s 1280x720 \
         -c:v libx264 \
@@ -798,7 +985,7 @@ run_video() {
         set -e
 
         if [ "$exit_code" -eq 0 ]; then
-            echo "Video finished normally."
+            echo "Slideshow cycle complete."
             return 0
         fi
 
@@ -808,53 +995,66 @@ run_video() {
             echo "Retrying in ${RETRY_DELAY}s..."
             sleep "$RETRY_DELAY"
         else
-            echo "ERROR: Max retries reached for this video. Moving on."
+            echo "ERROR: Max retries reached — re-fetching images for next cycle."
         fi
     done
     return 1
 }
 
 #############################################
-# Stream loop
+# MAIN LOOP
 #############################################
-IFS=',' read -ra RAW_URLS <<< "$VIDEO_URL"
-URLS=()
-for u in "${RAW_URLS[@]}"; do
-    u="${u#"${u%%[![:space:]]*}"}"
-    u="${u%"${u##*[![:space:]]}"}"
-    [ -n "$u" ] && URLS+=("$u")
-done
-NUM_URLS=${#URLS[@]}
-if [ "$NUM_URLS" -eq 0 ]; then
-    echo "ERROR: VIDEO_URL contained no valid entries after parsing"
-    exit 1
-fi
+echo ""
+echo "Starting Mars Live Stream main loop..."
+echo ""
 
-# Shuffle playback order fresh for every workflow run, so the sequence
-# of videos isn't identical every time the 5-hour cron restarts the
-# container. (Fisher-Yates via `shuf`, always available on Ubuntu.)
-if [ "$NUM_URLS" -gt 1 ]; then
-    mapfile -t URLS < <(printf '%s\n' "${URLS[@]}" | shuf)
-    echo "Shuffled playback order for this run:"
-    for u in "${URLS[@]}"; do
-        echo "  - $u"
-    done
-fi
+prepare_music
+
+LAST_STREAMED_SOL=""
+CURRENT_SOL=""
+FETCHED_IMAGES=()
+CAMERA_NAMES=()
+EARTH_DATES=()
+SOL_TIMES=()
+IMG_CAPTIONS=()
+IMAGE_FILES=()
+OVERLAY_INPUT_IDX=0
+AUDIO_INPUT_IDX=0
+DOWNLOAD_COUNT=0
+FACT_N=0
+HEAD_N=0
+STATUS_N=0
 
 while true; do
-    for ((i = 0; i < NUM_URLS; i++)); do
-        url="${URLS[$i]}"
-        next_idx=$(( (i + 1) % NUM_URLS ))
-        next_url="${URLS[$next_idx]}"
+    echo "========================================"
+    echo "New cycle starting at $(date -u +'%Y-%m-%d %H:%M UTC')"
+    echo "========================================"
 
-        run_video "$url"
-
-        if [ "$ENABLE_BUMPER" = true ]; then
-            run_bumper "$next_url"
+    if fetch_mars_images; then
+        if [ "$CURRENT_SOL" != "$LAST_STREAMED_SOL" ]; then
+            echo "New Sol detected ($CURRENT_SOL) — downloading fresh images..."
+            download_images
+            write_panel_assets
+            LAST_STREAMED_SOL="$CURRENT_SOL"
+        else
+            echo "Same Sol ($CURRENT_SOL) — reusing downloaded images, refreshing facts."
+            write_panel_assets
         fi
 
-        echo "Loading next video in 5 seconds..."
-        echo ""
-        sleep 5
-    done
+        N_SLIDES=$(ls "$IMAGES_DIR"/mars_sol*.jpg 2>/dev/null | wc -l | tr -d ' ')
+        if [ "$N_SLIDES" -eq 0 ]; then
+            echo "ERROR: No local images to show. Waiting 60s and retrying..."
+            sleep 60
+            continue
+        fi
+
+        run_stream "$N_SLIDES" || true
+    else
+        echo "ERROR: Failed to fetch Mars images. Retrying in 120s..."
+        sleep 120
+    fi
+
+    echo ""
+    echo "Cycle complete. Starting next cycle immediately to check for new Sol..."
+    echo ""
 done
