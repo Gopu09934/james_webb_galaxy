@@ -917,7 +917,7 @@ build_full_filter() {
     F+="[tk5]drawtext=fontfile=${FONT}:expansion=none:text='MARS LIVE':fontcolor=white:fontsize=14:x=12:y=695[tk6];"
 
     F+="[tk6]drawbox=x=345:y=648:w=360:h=20:color=black@0.30:t=fill[wmbg];"
-    F+="[wmbg]drawtext=fontfile=${FONT}:expansion=none:text='${CHANNEL_NAME}':fontcolor=white@0.55:fontsize=15:borderw=1.5:bordercolor=black@0.7:x=353:y=655[wm1];"
+    F+="[wmbg]drawtext=fontfile=${FONT}:expansion=none:text='${CHANNEL_NAME}':fontcolor=white@0.65:fontsize=16:borderw=2:bordercolor=black@0.75:x=w-tw-25:y=18[wm1];"
 
     local SUB_PULSE_ENABLE="lt(mod(t\,3)\,1)"
     local sub_ring_x=$((SUB_ICON_X - SUB_ICON_R))
