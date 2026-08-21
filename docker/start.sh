@@ -68,7 +68,7 @@ CHANNEL_NAME="Technical Talk india"
 SHADOW="shadowcolor=black@0.6:shadowx=1:shadowy=1"
 INFO_FONTSIZE=19
 INFO_LINE_SPACING=8
-MAX_IMAGES=80              # lowered from 301 — 300 simultaneous zoompans/xfades was too heavy for real-time CPU encoding (was rendering at ~0.46x speed)
+MAX_IMAGES=10             # lowered from 301 — 300 simultaneous zoompans/xfades was too heavy for real-time CPU encoding (was rendering at ~0.46x speed)
 PAGE_SIZE=100              # FIX 1: server caps per-request at ~100, we paginate
 VIEWER_MIN_TO_SHOW=10
 
