@@ -6,7 +6,13 @@ RUN apt-get update && \
     apt-get install -y \
         ffmpeg \
         curl \
-        ca-certificates && \
+        ca-certificates \
+        jq \
+        coreutils \
+        sed \
+        grep \
+        gawk \
+        procps && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
