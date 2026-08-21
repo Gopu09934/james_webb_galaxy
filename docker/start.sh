@@ -85,7 +85,7 @@ RETRY_DELAY=5
 # real-time bottleneck (not the encoder preset). If the stream is
 # still stuttering/lagging behind at MAX_IMAGES=80, lower it further
 # (e.g. 40-60) before touching anything else.
-ZOOM_FPS=24                 # lowered from 30 — cuts zoompan frame-render cost by ~20% with barely visible smoothness difference
+ZOOM_FPS=30                 # lowered from 30 — cuts zoompan frame-render cost by ~20% with barely visible smoothness difference
 XFADE_DUR=1                 # seconds of crossfade/wipe between consecutive images (kept as an integer to keep bash math simple)
 ZOOM_MAX=1.5                # max zoom factor for the Ken Burns effect
 ZOOM_STEP=0.0015            # per-frame zoom increment/decrement
@@ -598,7 +598,8 @@ build_slideshow_filter() {
         chain+="[${i}:v]scale=${KB_SCALE_W}:${KB_SCALE_H}:force_original_aspect_ratio=increase,"
         chain+="crop=${KB_SCALE_W}:${KB_SCALE_H},"
         chain+="zoompan=z='${z}':x='${x}':y='${y}':d=${frames}:s=1280x720:fps=${ZOOM_FPS},"
-        chain+="format=yuv420p,setsar=1[${label}];"
+chain+="setpts=N/${ZOOM_FPS}/TB,"
+chain+="format=yuv420p,setsar=1[${label}];"
 
         if [ "$i" -eq 0 ]; then
             prev="$label"
@@ -896,7 +897,7 @@ build_full_filter() {
     local sub_ring_d=$((SUB_ICON_R * 2))
     F+="[wm1]drawbox=x=${sub_ring_x}:y=${sub_ring_y}:w=${sub_ring_d}:h=${sub_ring_d}:color=${GOLD}@0.9:t=3:enable='${SUB_PULSE_ENABLE}'[wm2];"
 
-    F+="[wm2]drawbox=x=0:y=0:w=1280:h=720:color=black@0.5:t=2[final]"
+    F+="[wm2]drawbox=x=0:y=0:w=1280:h=720:color=black@0.5:t=2,fps=30[final]"
 
     echo "$F"
 }
@@ -959,12 +960,11 @@ run_stream() {
         -filter_complex_script "$filter_script" \
         -map "[final]" \
         -map "${AUDIO_INPUT_IDX}:a" \
-        -r 30 \
         -s 1280x720 \
         -c:v libx264 \
         -preset ultrafast \
         -tune zerolatency \
-        -threads 2 \
+        -threads 4 \
         -profile:v high \
         -level 4.1 \
         -pix_fmt yuv420p \
