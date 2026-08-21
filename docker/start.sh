@@ -908,6 +908,8 @@ build_full_filter() {
 run_stream() {
     local n_slides="$1"
     local attempt=1
+    local CYCLE_DURATION=$((n_slides * SLIDE_DURATION))
+echo "Cycle duration: ${CYCLE_DURATION} seconds"
 
     build_image_array
     if [ "${#IMAGE_FILES[@]}" -ne "$n_slides" ]; then
@@ -978,7 +980,7 @@ run_stream() {
         -b:a 128k \
         -ar 48000 \
         -ac 2 \
-        -shortest \
+        -t "$CYCLE_DURATION" \
         -f flv \
         "rtmp://a.rtmp.youtube.com/live2/${YOUTUBE_STREAM_KEY}"
         local exit_code=$?
