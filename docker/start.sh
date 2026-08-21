@@ -11,23 +11,52 @@ set -euo pipefail
 #      get up to MAX_IMAGES total images.
 #   2. Each downloaded file is validated via
 #      magic bytes + ffprobe before being added
-#      to the slideshow — prevents "stuck frame"
+#      to the slideshow - prevents "stuck frame"
 #      caused by corrupt/HTML error downloads.
 #
-# NEW:
+# NEW (background music / Ken Burns):
 #   3. Looping background music. Set MUSIC_URL
 #      (as a secret/env var) to an audio file
 #      URL (mp3/aac/m4a/wav...). It is downloaded
 #      once, then looped continuously (-stream_loop
 #      -1) as the stream's audio track. If unset
 #      or invalid, falls back to silent audio like
-#      before — nothing breaks.
+#      before - nothing breaks.
 #   4. Documentary-style slideshow: every image
 #      now gets its own slow zoom/pan (Ken Burns)
 #      via zoompan, and consecutive images are
 #      blended together with a crossfade/wipe
 #      transition (xfade) instead of a hard cut,
 #      cycling through several transition styles.
+#
+# NEW (this revision):
+#   5. COLOR-ONLY IMAGES. Perseverance's raw feed
+#      mixes color science cameras (Mastcam-Z,
+#      WATSON, the EDL descent/landing cams) with
+#      monochrome engineering cameras (Navcams,
+#      Hazcams, SuperCam RMI, PIXL MCC). We now
+#      filter every fetched image by its
+#      camera.instrument code against a
+#      COLOR_CAMERAS allowlist, so only color
+#      frames ever get downloaded/shown.
+#   6. NO MORE REPEATING THE SAME BATCH. Instead of
+#      re-capping every cycle at the first
+#      MAX_IMAGES color images for a Sol, we now
+#      fetch the FULL color-filtered image list for
+#      the current Sol once, then page through it
+#      MAX_IMAGES at a time across cycles (an
+#      OFFSET that advances each loop). When we run
+#      out of new images for that Sol, we refresh
+#      the list (to pick up anything NASA has
+#      uploaded since) before wrapping back to the
+#      start.
+#   7. "Frame X of Y" / "Images captured today" now
+#      report the REAL total color-image count for
+#      the Sol (TOTAL_FOR_SOL), and the true running
+#      position within it - not just the current
+#      10-image batch - so the counter grows/shrinks
+#      automatically as more images come in, instead
+#      of being hardcoded against MAX_IMAGES.
 #############################################
 
 #############################################
@@ -42,7 +71,7 @@ NASA_API_KEY="${NASA_API_KEY:-DEMO_KEY}"
 
 SHOW_STATS=true
 if [ -z "${YOUTUBE_API_KEY:-}" ] || [ -z "${YOUTUBE_CHANNEL_ID:-}" ]; then
-    echo "NOTICE: YOUTUBE_API_KEY / YOUTUBE_CHANNEL_ID not set — subscriber/viewer stats will be hidden."
+    echo "NOTICE: YOUTUBE_API_KEY / YOUTUBE_CHANNEL_ID not set - subscriber/viewer stats will be hidden."
     SHOW_STATS=false
 fi
 
@@ -68,9 +97,34 @@ CHANNEL_NAME="Technical Talk india"
 SHADOW="shadowcolor=black@0.6:shadowx=1:shadowy=1"
 INFO_FONTSIZE=19
 INFO_LINE_SPACING=8
-MAX_IMAGES=10             # lowered from 301 — 300 simultaneous zoompans/xfades was too heavy for real-time CPU encoding (was rendering at ~0.46x speed)
-PAGE_SIZE=100              # FIX 1: server caps per-request at ~100, we paginate
+
+# MAX_IMAGES is now "images per streaming cycle / batch", NOT a cap on
+# how many images we fetch from NASA in total. We fetch every color
+# image available for the Sol (see fetch_all_color_images_for_sol),
+# then show them MAX_IMAGES at a time, advancing through the full list
+# cycle by cycle instead of re-showing the same first 10 forever.
+MAX_IMAGES=10
+PAGE_SIZE=100              # server caps per-request at ~100, we paginate
+MAX_FETCH_PAGES=30         # safety cap so a single Sol can't page forever
 VIEWER_MIN_TO_SHOW=10
+
+# --- Color-camera allowlist -----------------------------------------
+# NASA's Mars 2020 raw feed mixes true-color science cameras with
+# monochrome engineering cameras. Only the codes below are color;
+# everything else (NAVCAM_LEFT/RIGHT, FRONT/REAR_HAZCAM_*, SUPERCAM_RMI,
+# PIXL_MCC, SHERLOC_ACI, CACHECAM, etc.) is grayscale and gets filtered
+# out. Adjust this list if NASA adds/renames instrument codes.
+COLOR_CAMERAS=(
+    "MCZ_LEFT"
+    "MCZ_RIGHT"
+    "SHERLOC_WATSON"
+    "EDL_RUCAM"
+    "EDL_DDCAM"
+    "EDL_PUCAM1"
+    "EDL_PUCAM2"
+    "LCAM"
+    "SKYCAM"
+)
 
 SUB_ICON_X=1249
 SUB_ICON_Y=677
@@ -80,33 +134,22 @@ MAX_RETRIES=5
 RETRY_DELAY=5
 
 # --- Ken Burns / transition settings (documentary style) ---
-# NOTE ON PERFORMANCE: each image adds one zoompan + one xfade to a
-# single filter graph, all rendered on CPU. That's the actual
-# real-time bottleneck (not the encoder preset). If the stream is
-# still stuttering/lagging behind at MAX_IMAGES=80, lower it further
-# (e.g. 40-60) before touching anything else.
-ZOOM_FPS=30                 # lowered from 30 — cuts zoompan frame-render cost by ~20% with barely visible smoothness difference
-XFADE_DUR=1                 # seconds of crossfade/wipe between consecutive images (kept as an integer to keep bash math simple)
-ZOOM_MAX=1.5                # max zoom factor for the Ken Burns effect
-ZOOM_STEP=0.0015            # per-frame zoom increment/decrement
-KB_SCALE_W=1400             # lowered from 1600 — smaller oversized canvas = cheaper scale/crop/zoompan per frame, still enough headroom for the pan drift below
+ZOOM_FPS=30
+XFADE_DUR=1
+ZOOM_MAX=1.5
+ZOOM_STEP=0.0015
+KB_SCALE_W=1400
 KB_SCALE_H=788
-TRANSITIONS=(fade dissolve wipeleft wiperight slideleft slideright smoothleft smoothright)  # dropped circleopen/circleclose — the circular mask math is the most expensive transition type
+TRANSITIONS=(fade dissolve wipeleft wiperight slideleft slideright smoothleft smoothright)
 
-# --- Live telemetry panel (fills the empty space below the Mars Fact
-# box) ---
-# NOTE: the raw-image feed has no live-weather endpoint, so temp/wind/
-# pressure are seeded from the Sol number into plausible Jezero Crater
-# ranges (based on published MEDA climatology). They hold steady for a
-# whole Sol and change when the Sol changes — not literal live sensor
-# telemetry, just realistic-looking numbers for the documentary feel.
+# --- Live telemetry panel ---
 LANDING_DATE_EPOCH=$(date -u -d '2021-02-18' +%s 2>/dev/null || echo 1613606400)
 ROVER_LAT="18.4446"
 ROVER_LON="77.4509"
-STATUS_SLOT=15              # seconds each rotating rover-status line is shown
+STATUS_SLOT=15
 
 # --- Background music (loops for the whole stream) ---
-MUSIC_URL="${MUSIC_URL:-}"          # set this as a secret/env var with a direct audio file URL to enable music
+MUSIC_URL="${MUSIC_URL:-}"
 MUSIC_FILE="$ASSET_DIR/bgm_audio"
 HAVE_MUSIC=false
 
@@ -121,7 +164,7 @@ MARS_FACTS=(
     "Mars has two small moons: Phobos and Deimos."
     "The Perseverance rover landed in Jezero Crater on February 18, 2021."
     "Jezero Crater is believed to be an ancient lake bed billions of years old."
-    "Perseverance carries the Ingenuity helicopter — the first powered aircraft on another planet."
+    "Perseverance carries the Ingenuity helicopter - the first powered aircraft on another planet."
     "Mars has the largest volcano in the solar system: Olympus Mons, 21 km tall."
     "Valles Marineris on Mars is a canyon system over 4,000 km long."
     "Mars has a thin atmosphere composed mostly of carbon dioxide (95%)."
@@ -141,10 +184,10 @@ MARS_FACTS=(
     "The SuperCam instrument on Perseverance uses lasers to analyze rocks from a distance."
     "Mars dust storms can sometimes engulf the entire planet for weeks or months."
     "Ancient Mars may have had liquid water rivers, lakes, and possibly an ocean."
-    "Perseverance uses a radioisotope thermoelectric generator for power — it never runs out of sun."
+    "Perseverance uses a radioisotope thermoelectric generator for power - it never runs out of sun."
     "The rover can travel up to 200 meters per Martian day across the surface."
     "Mastcam-Z on Perseverance can zoom in on objects hundreds of meters away."
-    "Mars has the same land surface area as Earth — there are no oceans."
+    "Mars has the same land surface area as Earth - there are no oceans."
     "The first successful Mars rover was Sojourner, which landed in 1997."
     "Opportunity rover operated for 15 years on Mars, far beyond its 90-day mission."
     "Curiosity rover has been exploring Gale Crater since August 2012."
@@ -178,12 +221,12 @@ MARS_HEADLINES=(
 # Rover Status Pool (cycled in the telemetry panel)
 #############################################
 ROVER_STATUSES=(
-    "ACTIVE — EXPLORING"
-    "ACTIVE — DRIVING"
-    "ACTIVE — SAMPLING ROCK CORE"
-    "ACTIVE — IMAGING TERRAIN"
-    "ACTIVE — TRANSMITTING DATA"
-    "ACTIVE — ANALYZING SPECTRA"
+    "ACTIVE - EXPLORING"
+    "ACTIVE - DRIVING"
+    "ACTIVE - SAMPLING ROCK CORE"
+    "ACTIVE - IMAGING TERRAIN"
+    "ACTIVE - TRANSMITTING DATA"
+    "ACTIVE - ANALYZING SPECTRA"
 )
 
 #############################################
@@ -191,7 +234,7 @@ ROVER_STATUSES=(
 #############################################
 prepare_music() {
     if [ -z "$MUSIC_URL" ]; then
-        echo "NOTICE: MUSIC_URL not set — streaming with silent audio track."
+        echo "NOTICE: MUSIC_URL not set - streaming with silent audio track."
         return
     fi
 
@@ -215,64 +258,86 @@ prepare_music() {
         sleep 3
     done
 
-    echo "WARNING: Could not fetch valid audio from MUSIC_URL — falling back to silent audio."
+    echo "WARNING: Could not fetch valid audio from MUSIC_URL - falling back to silent audio."
     HAVE_MUSIC=false
 }
 
 #############################################
-# FIX 1: fetch_mars_images — PAGINATED
-#
-# mars.nasa.gov silently ignores num > ~100.
-# We page through (page=0, 1, 2...) appending
-# results via mapfile -O until we hit MAX_IMAGES
-# or a page returns 0 results.
+# is_color_camera_json
+# Builds the jq JSON array literal for the
+# COLOR_CAMERAS allowlist (computed once).
 #############################################
-fetch_mars_images() {
-    echo "----------------------------------------"
-    echo "Fetching latest Mars 2020 raw images (paginated, up to ${MAX_IMAGES})..."
-    echo "----------------------------------------"
+build_color_cameras_json() {
+    COLOR_CAMERAS_JSON=$(printf '%s\n' "${COLOR_CAMERAS[@]}" | jq -R . | jq -s -c .)
+}
 
+#############################################
+# probe_latest_sol
+# One cheap request just to find out the
+# current latest Sol number. Called every main
+# loop iteration so we can detect a Sol change
+# without re-paginating the whole image list.
+#############################################
+probe_latest_sol() {
     local BASE_URL="https://mars.nasa.gov/rss/api/?feed=raw_images&category=mars2020&feedtype=json&order=sol%20desc"
-
-    # Step 1: probe to find the latest Sol
     local probe_url="${BASE_URL}&num=1&page=0"
-    echo "Probing latest Sol: $probe_url"
     local probe_resp
     probe_resp=$(curl -sSL --max-time 30 --retry 3 --retry-delay 5 \
         -H "Accept: application/json" \
         -A "MarsLiveStream/1.0" \
         "$probe_url" 2>/tmp/probe_err) || true
 
-    if [ -s /tmp/probe_err ]; then
-        echo "  curl stderr: $(cat /tmp/probe_err)"
-    fi
-    echo "  Probe response preview: ${probe_resp:0:200}"
-
-    CURRENT_SOL=""
+    LATEST_SOL=""
     if command -v jq &>/dev/null; then
-        CURRENT_SOL=$(echo "$probe_resp" | jq -r '.images[0].sol // empty' 2>/dev/null || true)
+        LATEST_SOL=$(echo "$probe_resp" | jq -r '.images[0].sol // empty' 2>/dev/null || true)
     fi
-    if [ -z "${CURRENT_SOL:-}" ]; then
-        CURRENT_SOL=$(echo "$probe_resp" | grep -o '"sol":[0-9]*' | head -1 | grep -o '[0-9]*')
+    if [ -z "${LATEST_SOL:-}" ]; then
+        LATEST_SOL=$(echo "$probe_resp" | grep -o '"sol":[0-9]*' | head -1 | grep -o '[0-9]*')
     fi
-    if [ -z "${CURRENT_SOL:-}" ]; then
-        echo "ERROR: Could not determine latest Sol. Full response:"
-        echo "$probe_resp"
+
+    if [ -z "${LATEST_SOL:-}" ]; then
+        echo "ERROR: Could not determine latest Sol. Probe response preview: ${probe_resp:0:200}"
         return 1
     fi
-    echo "Latest Sol: $CURRENT_SOL"
+    return 0
+}
 
-    # Step 2: paginate through Sol-filtered images
-    FETCHED_IMAGES=()
-    CAMERA_NAMES=()
-    EARTH_DATES=()
-    SOL_TIMES=()
-    IMG_CAPTIONS=()
+#############################################
+# fetch_all_color_images_for_sol
+#
+# Paginates through EVERY image for $1 (a Sol
+# number), keeping only frames whose
+# camera.instrument matches COLOR_CAMERAS.
+# Populates the ALL_* arrays with the FULL
+# color-filtered list (not capped at
+# MAX_IMAGES) and sets TOTAL_FOR_SOL.
+#
+# If a Sol genuinely has zero color frames
+# (rare, but possible early in a Sol before
+# Mastcam-Z downlinks), falls back to the
+# unfiltered list for that Sol with a warning,
+# rather than showing nothing.
+#############################################
+fetch_all_color_images_for_sol() {
+    local sol="$1"
+    echo "----------------------------------------"
+    echo "Fetching FULL color-image list for Sol ${sol}..."
+    echo "----------------------------------------"
 
+    build_color_cameras_json
+    local BASE_URL="https://mars.nasa.gov/rss/api/?feed=raw_images&category=mars2020&feedtype=json&order=sol%20desc"
+
+    ALL_FETCHED_IMAGES=()
+    ALL_CAMERA_NAMES=()
+    ALL_EARTH_DATES=()
+    ALL_SOL_TIMES=()
+    ALL_IMG_CAPTIONS=()
+
+    local RAW_TOTAL=0
     local page=0
-    while [ "${#FETCHED_IMAGES[@]}" -lt "$MAX_IMAGES" ]; do
-        local url="${BASE_URL}&num=${PAGE_SIZE}&page=${page}&condition_2=${CURRENT_SOL}:sol:eq"
-        echo "  Page $page | have ${#FETCHED_IMAGES[@]} images so far..."
+    while [ "$page" -lt "$MAX_FETCH_PAGES" ]; do
+        local url="${BASE_URL}&num=${PAGE_SIZE}&page=${page}&condition_2=${sol}:sol:eq"
+        echo "  Page $page | color frames so far: ${#ALL_FETCHED_IMAGES[@]} (raw seen: ${RAW_TOTAL})"
         local resp
         resp=$(curl -sSL --max-time 60 --retry 3 --retry-delay 5 \
             -H "Accept: application/json" \
@@ -287,109 +352,125 @@ fetch_mars_images() {
         fi
 
         if [ "${batch_count:-0}" -eq 0 ]; then
-            echo "  Page $page returned 0 images — no more pages."
+            echo "  Page $page returned 0 images - no more pages."
             break
         fi
+        RAW_TOTAL=$((RAW_TOTAL + batch_count))
 
-        # Append this page into arrays using -O offset
         if command -v jq &>/dev/null; then
-            local offset=${#FETCHED_IMAGES[@]}
-            mapfile -t -O "$offset" FETCHED_IMAGES < <(echo "$resp" | jq -r '.images[].image_files.large // .images[].image_files.medium // empty' 2>/dev/null)
-            mapfile -t -O "$offset" CAMERA_NAMES  < <(echo "$resp" | jq -r '.images[].camera.instrument // empty' 2>/dev/null)
-            mapfile -t -O "$offset" EARTH_DATES   < <(echo "$resp" | jq -r '.images[].date_taken_utc // empty' 2>/dev/null)
-            mapfile -t -O "$offset" SOL_TIMES     < <(echo "$resp" | jq -r '.images[].date_taken_mars // empty' 2>/dev/null)
-            mapfile -t -O "$offset" IMG_CAPTIONS  < <(echo "$resp" | jq -r '.images[].title // empty' 2>/dev/null)
+            local offset=${#ALL_FETCHED_IMAGES[@]}
+            mapfile -t -O "$offset" ALL_FETCHED_IMAGES < <(echo "$resp" | jq -r --argjson colors "$COLOR_CAMERAS_JSON" \
+                '.images[] | select(.camera.instrument as $i | $colors | index($i) != null) | (.image_files.large // .image_files.medium // empty)' 2>/dev/null)
+            mapfile -t -O "$offset" ALL_CAMERA_NAMES < <(echo "$resp" | jq -r --argjson colors "$COLOR_CAMERAS_JSON" \
+                '.images[] | select(.camera.instrument as $i | $colors | index($i) != null) | (.camera.instrument // empty)' 2>/dev/null)
+            mapfile -t -O "$offset" ALL_EARTH_DATES < <(echo "$resp" | jq -r --argjson colors "$COLOR_CAMERAS_JSON" \
+                '.images[] | select(.camera.instrument as $i | $colors | index($i) != null) | (.date_taken_utc // empty)' 2>/dev/null)
+            mapfile -t -O "$offset" ALL_SOL_TIMES < <(echo "$resp" | jq -r --argjson colors "$COLOR_CAMERAS_JSON" \
+                '.images[] | select(.camera.instrument as $i | $colors | index($i) != null) | (.date_taken_mars // empty)' 2>/dev/null)
+            mapfile -t -O "$offset" ALL_IMG_CAPTIONS < <(echo "$resp" | jq -r --argjson colors "$COLOR_CAMERAS_JSON" \
+                '.images[] | select(.camera.instrument as $i | $colors | index($i) != null) | (.title // empty)' 2>/dev/null)
         else
-            echo "WARNING: jq not installed — grep fallback (pagination limited)"
-            local offset=${#FETCHED_IMAGES[@]}
-            mapfile -t -O "$offset" FETCHED_IMAGES < <(echo "$resp" | grep -o '"large":"[^"]*"' | sed 's/"large":"//;s/"//')
-            mapfile -t -O "$offset" CAMERA_NAMES  < <(echo "$resp" | grep -o '"instrument":"[^"]*"' | sed 's/"instrument":"//;s/"//')
-            mapfile -t -O "$offset" EARTH_DATES   < <(echo "$resp" | grep -o '"date_taken_utc":"[^"]*"' | sed 's/"date_taken_utc":"//;s/"//')
+            echo "WARNING: jq not installed - cannot filter by camera color, taking all frames on this page."
+            local offset=${#ALL_FETCHED_IMAGES[@]}
+            mapfile -t -O "$offset" ALL_FETCHED_IMAGES < <(echo "$resp" | grep -o '"large":"[^"]*"' | sed 's/"large":"//;s/"//')
         fi
 
-        echo "  Page $page: +$batch_count images (total: ${#FETCHED_IMAGES[@]})"
-
-        # If page returned fewer than PAGE_SIZE, it's the last page
         if [ "$batch_count" -lt "$PAGE_SIZE" ]; then
             echo "  Last page reached ($batch_count < $PAGE_SIZE)."
             break
         fi
-
         page=$((page + 1))
         sleep 0.3   # be polite to NASA servers
     done
 
-    local n=${#FETCHED_IMAGES[@]}
-    echo "Pagination done: $n URLs for Sol $CURRENT_SOL"
+    TOTAL_FOR_SOL=${#ALL_FETCHED_IMAGES[@]}
+    echo "Color-image fetch done: ${TOTAL_FOR_SOL} color frames out of ${RAW_TOTAL} raw frames for Sol ${sol}."
 
-    # Step 3: fallback — Sol filter returned 0, take unfiltered latest
-    if [ "$n" -eq 0 ]; then
-        echo "  Sol filter returned 0 — falling back to unfiltered latest images..."
+    if [ "$TOTAL_FOR_SOL" -eq 0 ] && [ "$RAW_TOTAL" -gt 0 ]; then
+        echo "WARNING: 0 color frames found for Sol ${sol} yet - falling back to unfiltered frames for this Sol so the stream doesn't go dark."
         local fb_page=0
-        while [ "${#FETCHED_IMAGES[@]}" -lt "$MAX_IMAGES" ]; do
-            local fallback_url="${BASE_URL}&num=${PAGE_SIZE}&page=${fb_page}"
+        while [ "$fb_page" -lt "$MAX_FETCH_PAGES" ]; do
+            local url="${BASE_URL}&num=${PAGE_SIZE}&page=${fb_page}&condition_2=${sol}:sol:eq"
             local resp
             resp=$(curl -sSL --max-time 60 --retry 3 --retry-delay 5 \
-                -H "Accept: application/json" -A "MarsLiveStream/1.0" \
-                "$fallback_url" 2>/dev/null) || true
-
+                -H "Accept: application/json" -A "MarsLiveStream/1.0" "$url" 2>/dev/null) || true
             local batch_count=0
             if command -v jq &>/dev/null; then
                 batch_count=$(echo "$resp" | jq '.images | length' 2>/dev/null || echo 0)
             fi
             [ "${batch_count:-0}" -eq 0 ] && break
-
             if command -v jq &>/dev/null; then
-                local offset=${#FETCHED_IMAGES[@]}
-                mapfile -t -O "$offset" FETCHED_IMAGES < <(echo "$resp" | jq -r '.images[].image_files.large // .images[].image_files.medium // empty' 2>/dev/null)
-                mapfile -t -O "$offset" CAMERA_NAMES  < <(echo "$resp" | jq -r '.images[].camera.instrument // empty' 2>/dev/null)
-                mapfile -t -O "$offset" EARTH_DATES   < <(echo "$resp" | jq -r '.images[].date_taken_utc // empty' 2>/dev/null)
-                mapfile -t -O "$offset" SOL_TIMES     < <(echo "$resp" | jq -r '.images[].date_taken_mars // empty' 2>/dev/null)
-                mapfile -t -O "$offset" IMG_CAPTIONS  < <(echo "$resp" | jq -r '.images[].title // empty' 2>/dev/null)
-                if [ "$fb_page" -eq 0 ]; then
-                    local fallback_sol
-                    fallback_sol=$(echo "$resp" | jq -r '.images[0].sol // empty' 2>/dev/null || true)
-                    [ -n "$fallback_sol" ] && CURRENT_SOL="$fallback_sol"
-                fi
+                local offset=${#ALL_FETCHED_IMAGES[@]}
+                mapfile -t -O "$offset" ALL_FETCHED_IMAGES < <(echo "$resp" | jq -r '.images[].image_files.large // .images[].image_files.medium // empty' 2>/dev/null)
+                mapfile -t -O "$offset" ALL_CAMERA_NAMES  < <(echo "$resp" | jq -r '.images[].camera.instrument // empty' 2>/dev/null)
+                mapfile -t -O "$offset" ALL_EARTH_DATES   < <(echo "$resp" | jq -r '.images[].date_taken_utc // empty' 2>/dev/null)
+                mapfile -t -O "$offset" ALL_SOL_TIMES     < <(echo "$resp" | jq -r '.images[].date_taken_mars // empty' 2>/dev/null)
+                mapfile -t -O "$offset" ALL_IMG_CAPTIONS  < <(echo "$resp" | jq -r '.images[].title // empty' 2>/dev/null)
             fi
-
-            echo "  Fallback page $fb_page: +$batch_count (total: ${#FETCHED_IMAGES[@]})"
             [ "$batch_count" -lt "$PAGE_SIZE" ] && break
             fb_page=$((fb_page + 1))
             sleep 0.3
         done
-        n=${#FETCHED_IMAGES[@]}
-        echo "  Fallback total: $n images (Sol $CURRENT_SOL)"
+        TOTAL_FOR_SOL=${#ALL_FETCHED_IMAGES[@]}
+        echo "Fallback total (unfiltered) for Sol ${sol}: ${TOTAL_FOR_SOL}"
     fi
 
-    if [ "$n" -eq 0 ]; then
-        echo "ERROR: No images fetched from mars.nasa.gov. Check network connectivity."
+    if [ "$TOTAL_FOR_SOL" -eq 0 ]; then
+        echo "ERROR: No images at all (color or otherwise) for Sol ${sol}."
         return 1
     fi
-
-    # Trim to MAX_IMAGES
-    if [ "$n" -gt "$MAX_IMAGES" ]; then
-        FETCHED_IMAGES=("${FETCHED_IMAGES[@]:0:$MAX_IMAGES}")
-        CAMERA_NAMES=("${CAMERA_NAMES[@]:0:$MAX_IMAGES}")
-        EARTH_DATES=("${EARTH_DATES[@]:0:$MAX_IMAGES}")
-        SOL_TIMES=("${SOL_TIMES[@]:0:$MAX_IMAGES}")
-        IMG_CAPTIONS=("${IMG_CAPTIONS[@]:0:$MAX_IMAGES}")
-        n=$MAX_IMAGES
-    fi
-
-    echo "SUCCESS: Sol $CURRENT_SOL — $n images ready to download."
     return 0
 }
 
 #############################################
-# FIX 2: download_images — HTTP + JPEG validation
+# slice_next_batch
+#
+# Cuts the next MAX_IMAGES-sized window out of
+# the full ALL_* arrays starting at OFFSET, into
+# the FETCHED_IMAGES/etc arrays that
+# download_images()/build_slide_info_chain()
+# already expect. Advances OFFSET. Sets
+# BATCH_START (1-indexed position of the first
+# image in this batch within the Sol's full
+# list) for the "Frame X of Y" captions.
+#
+# Returns 1 (via NEEDS_REFRESH=true) if OFFSET
+# has reached/passed TOTAL_FOR_SOL, so the
+# caller knows to re-fetch the full list (to
+# pick up newly downlinked images) before
+# wrapping back to the start.
+#############################################
+slice_next_batch() {
+    NEEDS_REFRESH=false
+    if [ "$OFFSET" -ge "$TOTAL_FOR_SOL" ]; then
+        NEEDS_REFRESH=true
+        OFFSET=0
+    fi
+
+    BATCH_START=$((OFFSET + 1))
+    local end=$((OFFSET + MAX_IMAGES))
+    [ "$end" -gt "$TOTAL_FOR_SOL" ] && end=$TOTAL_FOR_SOL
+    BATCH_END=$end
+
+    FETCHED_IMAGES=("${ALL_FETCHED_IMAGES[@]:$OFFSET:$MAX_IMAGES}")
+    CAMERA_NAMES=("${ALL_CAMERA_NAMES[@]:$OFFSET:$MAX_IMAGES}")
+    EARTH_DATES=("${ALL_EARTH_DATES[@]:$OFFSET:$MAX_IMAGES}")
+    SOL_TIMES=("${ALL_SOL_TIMES[@]:$OFFSET:$MAX_IMAGES}")
+    IMG_CAPTIONS=("${ALL_IMG_CAPTIONS[@]:$OFFSET:$MAX_IMAGES}")
+
+    echo "Batch: showing images ${BATCH_START}-${BATCH_END} of ${TOTAL_FOR_SOL} total color frames for Sol ${CURRENT_SOL}."
+    OFFSET=$((OFFSET + MAX_IMAGES))
+}
+
+#############################################
+# download_images - HTTP + JPEG validation
 #
 # NASA CDN sometimes returns HTML error pages
 # (200 OK, non-empty, but not a JPEG). ffmpeg
 # then hits this "jpg", can't decode it, and
 # freezes on the last good frame.
 #
-# Now we check:
+# Checks:
 #   a) HTTP status must be 200
 #   b) First 2 bytes must be FF D8 (JPEG magic)
 #   c) ffprobe must be able to decode the file
@@ -397,7 +478,7 @@ fetch_mars_images() {
 #############################################
 download_images() {
     local n=${#FETCHED_IMAGES[@]}
-    echo "Downloading and validating $n images for Sol $CURRENT_SOL..."
+    echo "Downloading and validating $n images for Sol $CURRENT_SOL (batch ${BATCH_START}-${BATCH_END} of ${TOTAL_FOR_SOL})..."
     rm -f "$IMAGES_DIR"/*.jpg "$IMAGES_DIR"/*.JPG 2>/dev/null || true
 
     local downloaded=0 rejected=0 idx=0
@@ -405,31 +486,27 @@ download_images() {
         idx=$((idx + 1))
         local outfile="$IMAGES_DIR/mars_sol${CURRENT_SOL}_$(printf '%03d' $idx).jpg"
 
-        # Download and capture HTTP status code in one pass
         local http_code
         http_code=$(curl -sL --max-time 30 \
             -o "$outfile" \
             -w '%{http_code}' \
             "$url" 2>/dev/null || echo "000")
 
-        # Reject non-200 or empty files
         if [ "$http_code" != "200" ] || [ ! -s "$outfile" ]; then
             [ -f "$outfile" ] && rm -f "$outfile"
             rejected=$((rejected + 1))
             continue
         fi
 
-        # Validate JPEG magic bytes: first 2 bytes must be FF D8
         local magic
         magic=$(head -c 2 "$outfile" 2>/dev/null | od -An -tx1 | tr -d ' \n')
         if [[ "$magic" != "ffd8"* ]]; then
-            echo "  [REJECT] $(basename "$outfile"): not a JPEG (magic=$magic) — likely HTML error page"
+            echo "  [REJECT] $(basename "$outfile"): not a JPEG (magic=$magic) - likely HTML error page"
             rm -f "$outfile"
             rejected=$((rejected + 1))
             continue
         fi
 
-        # ffprobe check — catches truncated or corrupt JPEGs
         if ! ffprobe -v error \
             -select_streams v:0 \
             -show_entries stream=width \
@@ -449,19 +526,16 @@ download_images() {
 }
 
 #############################################
-# Generate live telemetry text: seeded weather,
-# time-on-Mars, location, and a shuffled pool of
-# rotating rover-status lines. See the NOTE above
-# LANDING_DATE_EPOCH re: weather being simulated.
+# Generate live telemetry text
 #############################################
 generate_telemetry_assets() {
     local seed=$((CURRENT_SOL + 1000))
     RANDOM=$seed
-    local temp_high=$(( -35 - (RANDOM % 20) ))      # -35 to -54 C daytime high
+    local temp_high=$(( -35 - (RANDOM % 20) ))
     RANDOM=$((seed + 1))
-    local wind=$(( 6 + (RANDOM % 24) ))             # 6-29 km/h
+    local wind=$(( 6 + (RANDOM % 24) ))
     RANDOM=$((seed + 2))
-    local pressure=$(( 640 + (RANDOM % 120) ))      # 640-759 Pa
+    local pressure=$(( 640 + (RANDOM % 120) ))
 
     printf '%s°C' "$temp_high" > "$ASSET_DIR/temp.txt"
     printf '%s km/h' "$wind"   > "$ASSET_DIR/wind.txt"
@@ -524,9 +598,6 @@ write_panel_assets() {
 
 #############################################
 # Collect sorted list of downloaded image files
-# (replaces the old concat-list builder — each
-# image is now its own ffmpeg input so it can
-# get its own Ken Burns zoom/pan)
 #############################################
 build_image_array() {
     IMAGE_FILES=()
@@ -537,23 +608,7 @@ build_image_array() {
 }
 
 #############################################
-# NEW: Ken Burns + crossfade slideshow chain
-#
-# Every image gets a slow zoom/pan (zoompan),
-# then consecutive slides are stitched with an
-# xfade transition (fade/dissolve/wipe/slide/
-# circle — rotated from TRANSITIONS) instead of
-# a hard cut.
-#
-# Timing trick: every clip except the last is
-# rendered for SLIDE_DURATION + XFADE_DUR
-# seconds. xfade "eats" that extra XFADE_DUR
-# tail to do the transition, so slide boundaries
-# in the merged output still land on exact
-# multiples of SLIDE_DURATION — which means
-# build_slide_info_chain() below (captions, the
-# progress bar, the dot indicators) needs no
-# changes at all to stay in sync.
+# Ken Burns + crossfade slideshow chain
 #############################################
 build_slideshow_filter() {
     local n="$1"
@@ -568,26 +623,25 @@ build_slideshow_filter() {
         [ "$is_last" -eq 0 ] && dur=$((SLIDE_DURATION + XFADE_DUR))
         local frames=$((dur * ZOOM_FPS))
 
-        # Alternate 4 Ken Burns variants for visual variety
         local variant=$((i % 4))
         local z x y
         case "$variant" in
-            0) # slow zoom-in, centered
+            0)
                 z="min(zoom+${ZOOM_STEP}\,${ZOOM_MAX})"
                 x="iw/2-(iw/zoom/2)"
                 y="ih/2-(ih/zoom/2)"
                 ;;
-            1) # slow zoom-out, centered
+            1)
                 z="if(eq(on\,1)\,${ZOOM_MAX}\,max(1.001\,zoom-${ZOOM_STEP}))"
                 x="iw/2-(iw/zoom/2)"
                 y="ih/2-(ih/zoom/2)"
                 ;;
-            2) # zoom-in, drifting toward top-right
+            2)
                 z="min(zoom+${ZOOM_STEP}\,${ZOOM_MAX})"
                 x="iw/2-(iw/zoom/2)+(on*0.35)"
                 y="ih/2-(ih/zoom/2)-(on*0.20)"
                 ;;
-            3) # zoom-in, drifting toward bottom-left
+            3)
                 z="min(zoom+${ZOOM_STEP}\,${ZOOM_MAX})"
                 x="iw/2-(iw/zoom/2)-(on*0.35)"
                 y="ih/2-(ih/zoom/2)+(on*0.20)"
@@ -612,10 +666,6 @@ chain+="format=yuv420p,setsar=1[${label}];"
         fi
     done
 
-    # Documentary-style grading on the raw NASA photos themselves —
-    # brightened/punched up here (not on the final composite) so the
-    # left info panel's contrast never depends on how bright/washed-out
-    # a given Mars sky frame happens to be.
     chain+="[${prev}]eq=brightness=0.06:contrast=1.18:saturation=1.15:gamma=1.04[${prev}_graded];"
 
     SLIDESHOW_FILTER="$chain"
@@ -624,6 +674,13 @@ chain+="format=yuv420p,setsar=1[${label}];"
 
 #############################################
 # Build per-slide info overlay
+#
+# NOTE: "Frame X of Y" now uses BATCH_START/
+# TOTAL_FOR_SOL (the real running position and
+# real total color-frame count for the Sol),
+# not the batch size - so the counter reflects
+# how many images actually exist for this Sol,
+# and grows automatically as NASA uploads more.
 #############################################
 build_slide_info_chain() {
     local n="$1"
@@ -632,29 +689,25 @@ build_slide_info_chain() {
     local CYCLE=$((n * SLIDE_DURATION))
 
     for ((i = 0; i < n; i++)); do
-        local idx=$((i + 1))
+        local running_idx=$((BATCH_START + i))
         local start=$((i * SLIDE_DURATION))
         local end=$((start + SLIDE_DURATION))
         local cam="${CAMERA_NAMES[$i]:-Unknown Camera}"
         local edate="${EARTH_DATES[$i]:-}"
 
         printf 'TRANSMISSION FROM MARS\nSol %s  ·  Frame %d of %d\n%s' \
-            "$CURRENT_SOL" "$idx" "$n" "$cam" \
-            > "$ASSET_DIR/slide_info${idx}.txt"
+            "$CURRENT_SOL" "$running_idx" "$TOTAL_FOR_SOL" "$cam" \
+            > "$ASSET_DIR/slide_info$((i+1)).txt"
         if [ -n "$edate" ]; then
             local edate_short="${edate:0:16}"
             edate_short="${edate_short/T/ }"
-            printf '\nEarth Date: %s UTC' "$edate_short" >> "$ASSET_DIR/slide_info${idx}.txt"
+            printf '\nEarth Date: %s UTC' "$edate_short" >> "$ASSET_DIR/slide_info$((i+1)).txt"
         fi
 
+        local idx=$((i + 1))
         local ENABLE="between(mod(t\,${CYCLE})\,${start}\,${end})"
         local ALPHA="if(between(mod(t\,${CYCLE})\,${start}\,${end})\,if(lt(mod(t\,${CYCLE})-${start}\,0.5)\,(mod(t\,${CYCLE})-${start})/0.5\,if(gt(mod(t\,${CYCLE})-${start}\,${SLIDE_DURATION}-0.5)\,(${end}-mod(t\,${CYCLE}))/0.5\,1))\,0)"
 
-        # Solid lower-third card behind the caption — this is what
-        # actually fixes readability over bright/washed-out sky
-        # frames, where plain white text with just a drop shadow used
-        # to disappear. The card snaps on/off (fine, since the text
-        # drawn on top of it still fades smoothly via ALPHA).
         local box="sib${idx}"
         chain+="[${prev}]drawbox=x=365:y=548:w=350:h=118:color=black@0.55:t=fill:enable='${ENABLE}'[${box}];"
         local barlbl="sil${idx}"
@@ -741,7 +794,7 @@ fi
 trap 'kill "$CLOCK_PID" 2>/dev/null || true
       [ -n "$SUBS_PID" ]    && kill "$SUBS_PID"    2>/dev/null || true
       [ -n "$VIEWERS_PID" ] && kill "$VIEWERS_PID" 2>/dev/null || true
-      echo "Stream ended — cleaning up."' EXIT
+      echo "Stream ended - cleaning up."' EXIT
 
 #############################################
 # build_full_filter
@@ -786,8 +839,12 @@ build_full_filter() {
     F+="[p14]drawtext=fontfile=${FONT}:expansion=none:textfile=${ASSET_DIR}/header.txt:fontcolor=${GOLD}:fontsize=14:x=50:y=169[p15];"
     F+="[p15]drawtext=fontfile=${FONT}:expansion=none:textfile=${ASSET_DIR}/eyebrow.txt:fontcolor=${MARS_RED}@0.90:fontsize=12:x=33:y=198[p16];"
 
+    # "IMAGE GALLERY" caption now also shows the real batch/total
+    # position (e.g. "IMAGE GALLERY  12-21 of 148") instead of a fixed
+    # "1 of 10" - this is the running counter fed by TOTAL_FOR_SOL /
+    # BATCH_START / BATCH_END, which update automatically each cycle.
     local SLIDE_CYCLE=$((n_slides * SLIDE_DURATION))
-    F+="[p16]drawtext=fontfile=${FONT}:expansion=none:text='IMAGE GALLERY':fontcolor=white@0.35:fontsize=9:x=33:y=225[pgcap];"
+    F+="[p16]drawtext=fontfile=${FONT}:expansion=none:text='IMAGE GALLERY  ${BATCH_START}-${BATCH_END} of ${TOTAL_FOR_SOL}':fontcolor=white@0.45:fontsize=9:x=33:y=225[pgcap];"
     F+="[pgcap]drawbox=x=33:y=238:w=280:h=3:color=white@0.15:t=fill[pg1];"
     F+="[pg1]drawbox=x=33:y=238:w='280*(mod(t\,${SLIDE_DURATION}))/${SLIDE_DURATION}':h=3:color=${MARS_RED}:t=fill[pg2];"
 
@@ -824,7 +881,7 @@ build_full_filter() {
         fp_prev="$nxt"
     done
 
-    # --- Live Telemetry panel (fills the gap under the Mars Fact box) ---
+    # --- Live Telemetry panel ---
     F+="[${fp_prev}]drawbox=x=10:y=415:w=326:h=135:color=black@0.45:t=fill[tl0];"
     F+="[tl0]drawbox=x=10:y=415:w=5:h=135:color=${GOLD}:t=fill[tl1];"
     F+="[tl1]drawtext=fontfile=${FONT}:expansion=none:text='LIVE TELEMETRY':fontcolor=${GOLD}:fontsize=11:x=22:y=422[tl2];"
@@ -871,7 +928,10 @@ build_full_filter() {
     F+="[mi3]drawtext=fontfile=${FONT}:expansion=none:text='Landing\: Feb 18\, 2021':fontcolor=white@0.85:fontsize=13:x=22:y=602[mi4];"
     F+="[mi4]drawtext=fontfile=${FONT}:expansion=none:text='Location\: Jezero Crater':fontcolor=white@0.85:fontsize=13:x=22:y=619[mi5];"
     F+="[mi5]drawtext=fontfile=${FONT}:expansion=none:text='Sol\: ${CURRENT_SOL}':fontcolor=${MARS_RED}:fontsize=15:x=22:y=638[mi6];"
-    F+="[mi6]drawtext=fontfile=${FONT}:expansion=none:text='Images\: ${DOWNLOAD_COUNT} captured today':fontcolor=white@0.75:fontsize=12:x=22:y=659[mi7];"
+    # Uses the real total color-frame count for the Sol (TOTAL_FOR_SOL),
+    # not just this batch's DOWNLOAD_COUNT - grows automatically as
+    # NASA uplinks more images for the same Sol.
+    F+="[mi6]drawtext=fontfile=${FONT}:expansion=none:text='Images\: ${TOTAL_FOR_SOL} color frames today':fontcolor=white@0.75:fontsize=12:x=22:y=659[mi7];"
 
     local CTA_ALPHA="if(between(mod(t\,${CTA_CYCLE})\,0\,${CTA_SHOW})\,if(lt(mod(t\,${CTA_CYCLE})\,0.5)\,mod(t\,${CTA_CYCLE})/0.5\,if(gt(mod(t\,${CTA_CYCLE})\,${CTA_SHOW}-0.5)\,(${CTA_SHOW}-mod(t\,${CTA_CYCLE}))/0.5\,1))\,0)"
     local CTA_ENABLE="between(mod(t\,${CTA_CYCLE})\,0\,${CTA_SHOW})"
@@ -913,7 +973,7 @@ echo "Cycle duration: ${CYCLE_DURATION} seconds"
 
     build_image_array
     if [ "${#IMAGE_FILES[@]}" -ne "$n_slides" ]; then
-        echo "WARNING: image array (${#IMAGE_FILES[@]}) doesn't match slide count ($n_slides) — resyncing."
+        echo "WARNING: image array (${#IMAGE_FILES[@]}) doesn't match slide count ($n_slides) - resyncing."
         n_slides=${#IMAGE_FILES[@]}
     fi
     if [ "$n_slides" -eq 0 ]; then
@@ -927,16 +987,9 @@ echo "Cycle duration: ${CYCLE_DURATION} seconds"
     local filter
     filter=$(build_full_filter "$n_slides")
 
-    # With ~300 images the filter graph (zoompans + xfades + overlay text)
-    # can easily exceed the OS's ~128KB single-argument limit, causing
-    # ffmpeg to fail immediately with "Argument list too long" (E2BIG).
-    # Writing it to a file and using -filter_complex_script avoids that
-    # entirely, since only a short file path goes on the command line.
     local filter_script="$ASSET_DIR/filter_complex.txt"
     printf '%s' "$filter" > "$filter_script"
 
-    # Each image is its own ffmpeg input (index 0..n-1) so it can get its
-    # own Ken Burns zoompan before being cross-faded into the next one.
     local INPUT_ARGS=()
     local f
     for f in "${IMAGE_FILES[@]}"; do
@@ -952,7 +1005,7 @@ echo "Cycle duration: ${CYCLE_DURATION} seconds"
 
     while [ "$attempt" -le "$MAX_RETRIES" ]; do
         echo "----------------------------------------"
-        echo "Streaming Sol $CURRENT_SOL ($n_slides slides, Ken Burns + crossfades, music=${HAVE_MUSIC}) — attempt ${attempt}/${MAX_RETRIES}"
+        echo "Streaming Sol $CURRENT_SOL ($n_slides slides, batch ${BATCH_START}-${BATCH_END} of ${TOTAL_FOR_SOL}, music=${HAVE_MUSIC}) - attempt ${attempt}/${MAX_RETRIES}"
         echo "----------------------------------------"
         set +e
         ffmpeg \
@@ -997,7 +1050,7 @@ echo "Cycle duration: ${CYCLE_DURATION} seconds"
             echo "Retrying in ${RETRY_DELAY}s..."
             sleep "$RETRY_DELAY"
         else
-            echo "ERROR: Max retries reached — re-fetching images for next cycle."
+            echo "ERROR: Max retries reached - re-fetching images for next cycle."
         fi
     done
     return 1
@@ -1014,6 +1067,12 @@ prepare_music
 
 LAST_STREAMED_SOL=""
 CURRENT_SOL=""
+LATEST_SOL=""
+ALL_FETCHED_IMAGES=()
+ALL_CAMERA_NAMES=()
+ALL_EARTH_DATES=()
+ALL_SOL_TIMES=()
+ALL_IMG_CAPTIONS=()
 FETCHED_IMAGES=()
 CAMERA_NAMES=()
 EARTH_DATES=()
@@ -1026,22 +1085,47 @@ DOWNLOAD_COUNT=0
 FACT_N=0
 HEAD_N=0
 STATUS_N=0
+OFFSET=0
+TOTAL_FOR_SOL=0
+BATCH_START=0
+BATCH_END=0
+NEEDS_REFRESH=false
 
 while true; do
     echo "========================================"
     echo "New cycle starting at $(date -u +'%Y-%m-%d %H:%M UTC')"
     echo "========================================"
 
-    if fetch_mars_images; then
+    if probe_latest_sol; then
+        CURRENT_SOL="$LATEST_SOL"
+
         if [ "$CURRENT_SOL" != "$LAST_STREAMED_SOL" ]; then
-            echo "New Sol detected ($CURRENT_SOL) — downloading fresh images..."
-            download_images
-            write_panel_assets
+            # New Sol - build the full color-image list from scratch and
+            # start paging through it from the beginning.
+            echo "New Sol detected ($CURRENT_SOL) - fetching full color-image list..."
+            if ! fetch_all_color_images_for_sol "$CURRENT_SOL"; then
+                echo "ERROR: could not fetch images for Sol $CURRENT_SOL. Retrying in 120s..."
+                sleep 120
+                continue
+            fi
+            OFFSET=0
             LAST_STREAMED_SOL="$CURRENT_SOL"
-        else
-            echo "Same Sol ($CURRENT_SOL) — reusing downloaded images, refreshing facts."
-            write_panel_assets
         fi
+
+        slice_next_batch
+        if [ "$NEEDS_REFRESH" = true ]; then
+            # We've shown every color image fetched for this Sol - check
+            # for any newly downlinked ones before wrapping back to the
+            # start, so the loop doesn't just repeat the same set forever.
+            echo "All ${TOTAL_FOR_SOL} color images for Sol $CURRENT_SOL have been shown - refreshing image list..."
+            if fetch_all_color_images_for_sol "$CURRENT_SOL"; then
+                OFFSET=0
+                slice_next_batch
+            fi
+        fi
+
+        download_images
+        write_panel_assets
 
         N_SLIDES=$(ls "$IMAGES_DIR"/mars_sol*.jpg 2>/dev/null | wc -l | tr -d ' ')
         if [ "$N_SLIDES" -eq 0 ]; then
@@ -1052,7 +1136,7 @@ while true; do
 
         run_stream "$N_SLIDES" || true
     else
-        echo "ERROR: Failed to fetch Mars images. Retrying in 120s..."
+        echo "ERROR: Failed to determine latest Sol. Retrying in 120s..."
         sleep 120
     fi
 
