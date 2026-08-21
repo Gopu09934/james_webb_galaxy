@@ -34,29 +34,34 @@ set -euo pipefail
 #      mixes color science cameras (Mastcam-Z,
 #      WATSON, the EDL descent/landing cams) with
 #      monochrome engineering cameras (Navcams,
-#      Hazcams, SuperCam RMI, PIXL MCC). We now
-#      filter every fetched image by its
+#      Hazcams, SuperCam RMI, PIXL MCC). Every
+#      fetched image is filtered by its
 #      camera.instrument code against a
 #      COLOR_CAMERAS allowlist, so only color
-#      frames ever get downloaded/shown.
-#   6. NO MORE REPEATING THE SAME BATCH. Instead of
-#      re-capping every cycle at the first
-#      MAX_IMAGES color images for a Sol, we now
-#      fetch the FULL color-filtered image list for
-#      the current Sol once, then page through it
-#      MAX_IMAGES at a time across cycles (an
-#      OFFSET that advances each loop). When we run
-#      out of new images for that Sol, we refresh
-#      the list (to pick up anything NASA has
+#      frames ever get downloaded/shown. We do NOT
+#      pin to a single Sol: a drive-heavy Sol can
+#      have zero color frames yet (only grayscale
+#      Navcam/Hazcam), so instead we scan backward
+#      through recent Sols (newest first, no Sol
+#      lock) until enough color frames are found -
+#      never falling back to grayscale.
+#   6. NO MORE REPEATING THE SAME BATCH. We fetch a
+#      large recent color-filtered image set once,
+#      then page through it MAX_IMAGES at a time
+#      across cycles (an OFFSET that advances each
+#      loop). When we run out of new images, we
+#      refresh the set (to pick up anything NASA has
 #      uploaded since) before wrapping back to the
 #      start.
-#   7. "Frame X of Y" / "Images captured today" now
-#      report the REAL total color-image count for
-#      the Sol (TOTAL_FOR_SOL), and the true running
-#      position within it - not just the current
-#      10-image batch - so the counter grows/shrinks
-#      automatically as more images come in, instead
-#      of being hardcoded against MAX_IMAGES.
+#   7. "Frame X of Y" / "Images: N recent color
+#      frames" now report the REAL total color-image
+#      count found (TOTAL_FOR_SOL) and the true
+#      running position within it - not just the
+#      current 10-image batch - so the counter
+#      grows/shrinks automatically, instead of being
+#      hardcoded against MAX_IMAGES. Each frame's
+#      caption also shows ITS OWN Sol number, since a
+#      batch can now span a few recent Sols.
 #############################################
 
 #############################################
@@ -99,13 +104,14 @@ INFO_FONTSIZE=19
 INFO_LINE_SPACING=8
 
 # MAX_IMAGES is now "images per streaming cycle / batch", NOT a cap on
-# how many images we fetch from NASA in total. We fetch every color
-# image available for the Sol (see fetch_all_color_images_for_sol),
-# then show them MAX_IMAGES at a time, advancing through the full list
-# cycle by cycle instead of re-showing the same first 10 forever.
+# how many images we fetch from NASA in total. We fetch a large recent
+# set of color images (see fetch_recent_color_images), then show them
+# MAX_IMAGES at a time, advancing through the full list cycle by cycle
+# instead of re-showing the same first 10 forever.
 MAX_IMAGES=10
 PAGE_SIZE=100              # server caps per-request at ~100, we paginate
-MAX_FETCH_PAGES=30         # safety cap so a single Sol can't page forever
+MAX_FETCH_PAGES=40         # safety cap on how many raw pages we'll scan per refresh
+COLOR_TARGET=250           # stop paginating once we've collected this many color frames
 VIEWER_MIN_TO_SHOW=10
 
 # --- Color-camera allowlist -----------------------------------------
@@ -272,56 +278,35 @@ build_color_cameras_json() {
 }
 
 #############################################
-# probe_latest_sol
-# One cheap request just to find out the
-# current latest Sol number. Called every main
-# loop iteration so we can detect a Sol change
-# without re-paginating the whole image list.
-#############################################
-probe_latest_sol() {
-    local BASE_URL="https://mars.nasa.gov/rss/api/?feed=raw_images&category=mars2020&feedtype=json&order=sol%20desc"
-    local probe_url="${BASE_URL}&num=1&page=0"
-    local probe_resp
-    probe_resp=$(curl -sSL --max-time 30 --retry 3 --retry-delay 5 \
-        -H "Accept: application/json" \
-        -A "MarsLiveStream/1.0" \
-        "$probe_url" 2>/tmp/probe_err) || true
-
-    LATEST_SOL=""
-    if command -v jq &>/dev/null; then
-        LATEST_SOL=$(echo "$probe_resp" | jq -r '.images[0].sol // empty' 2>/dev/null || true)
-    fi
-    if [ -z "${LATEST_SOL:-}" ]; then
-        LATEST_SOL=$(echo "$probe_resp" | grep -o '"sol":[0-9]*' | head -1 | grep -o '[0-9]*')
-    fi
-
-    if [ -z "${LATEST_SOL:-}" ]; then
-        echo "ERROR: Could not determine latest Sol. Probe response preview: ${probe_resp:0:200}"
-        return 1
-    fi
-    return 0
-}
-
-#############################################
-# fetch_all_color_images_for_sol
+# fetch_recent_color_images
 #
-# Paginates through EVERY image for $1 (a Sol
-# number), keeping only frames whose
+# Paginates the raw feed newest-first (no Sol
+# lock) and keeps ONLY frames whose
 # camera.instrument matches COLOR_CAMERAS.
-# Populates the ALL_* arrays with the FULL
-# color-filtered list (not capped at
-# MAX_IMAGES) and sets TOTAL_FOR_SOL.
 #
-# If a Sol genuinely has zero color frames
-# (rare, but possible early in a Sol before
-# Mastcam-Z downlinks), falls back to the
-# unfiltered list for that Sol with a warning,
-# rather than showing nothing.
+# Why no Sol lock: on drive-heavy Sols the
+# rover downlinks mostly Navcam/Hazcam
+# (grayscale) engineering frames and may have
+# zero Mastcam-Z/color frames for that exact
+# Sol yet. Pinning to a single Sol meant we'd
+# either show nothing or (as before) silently
+# fall back to grayscale. Instead we scan
+# backward through recent Sols until we've
+# collected COLOR_TARGET color frames (or hit
+# MAX_FETCH_PAGES), so the set naturally spans
+# however many recent Sols it takes to find
+# real color imagery - and NEVER grayscale.
+#
+# Populates the ALL_* arrays (including
+# ALL_SOL_NUMS, each frame's own Sol number,
+# since the set can span multiple Sols) and
+# sets TOTAL_FOR_SOL + CURRENT_SOL (the most
+# recent Sol represented, used for the
+# dashboard's "Sol" display).
 #############################################
-fetch_all_color_images_for_sol() {
-    local sol="$1"
+fetch_recent_color_images() {
     echo "----------------------------------------"
-    echo "Fetching FULL color-image list for Sol ${sol}..."
+    echo "Fetching recent color images (Mastcam-Z / WATSON / EDL / etc.)..."
     echo "----------------------------------------"
 
     build_color_cameras_json
@@ -332,11 +317,12 @@ fetch_all_color_images_for_sol() {
     ALL_EARTH_DATES=()
     ALL_SOL_TIMES=()
     ALL_IMG_CAPTIONS=()
+    ALL_SOL_NUMS=()
 
     local RAW_TOTAL=0
     local page=0
-    while [ "$page" -lt "$MAX_FETCH_PAGES" ]; do
-        local url="${BASE_URL}&num=${PAGE_SIZE}&page=${page}&condition_2=${sol}:sol:eq"
+    while [ "$page" -lt "$MAX_FETCH_PAGES" ] && [ "${#ALL_FETCHED_IMAGES[@]}" -lt "$COLOR_TARGET" ]; do
+        local url="${BASE_URL}&num=${PAGE_SIZE}&page=${page}"
         echo "  Page $page | color frames so far: ${#ALL_FETCHED_IMAGES[@]} (raw seen: ${RAW_TOTAL})"
         local resp
         resp=$(curl -sSL --max-time 60 --retry 3 --retry-delay 5 \
@@ -369,10 +355,11 @@ fetch_all_color_images_for_sol() {
                 '.images[] | select(.camera.instrument as $i | $colors | index($i) != null) | (.date_taken_mars // empty)' 2>/dev/null)
             mapfile -t -O "$offset" ALL_IMG_CAPTIONS < <(echo "$resp" | jq -r --argjson colors "$COLOR_CAMERAS_JSON" \
                 '.images[] | select(.camera.instrument as $i | $colors | index($i) != null) | (.title // empty)' 2>/dev/null)
+            mapfile -t -O "$offset" ALL_SOL_NUMS < <(echo "$resp" | jq -r --argjson colors "$COLOR_CAMERAS_JSON" \
+                '.images[] | select(.camera.instrument as $i | $colors | index($i) != null) | (.sol // empty)' 2>/dev/null)
         else
-            echo "WARNING: jq not installed - cannot filter by camera color, taking all frames on this page."
-            local offset=${#ALL_FETCHED_IMAGES[@]}
-            mapfile -t -O "$offset" ALL_FETCHED_IMAGES < <(echo "$resp" | grep -o '"large":"[^"]*"' | sed 's/"large":"//;s/"//')
+            echo "ERROR: jq is required to filter by camera color (so grayscale frames never slip through) - install jq."
+            return 1
         fi
 
         if [ "$batch_count" -lt "$PAGE_SIZE" ]; then
@@ -384,41 +371,17 @@ fetch_all_color_images_for_sol() {
     done
 
     TOTAL_FOR_SOL=${#ALL_FETCHED_IMAGES[@]}
-    echo "Color-image fetch done: ${TOTAL_FOR_SOL} color frames out of ${RAW_TOTAL} raw frames for Sol ${sol}."
-
-    if [ "$TOTAL_FOR_SOL" -eq 0 ] && [ "$RAW_TOTAL" -gt 0 ]; then
-        echo "WARNING: 0 color frames found for Sol ${sol} yet - falling back to unfiltered frames for this Sol so the stream doesn't go dark."
-        local fb_page=0
-        while [ "$fb_page" -lt "$MAX_FETCH_PAGES" ]; do
-            local url="${BASE_URL}&num=${PAGE_SIZE}&page=${fb_page}&condition_2=${sol}:sol:eq"
-            local resp
-            resp=$(curl -sSL --max-time 60 --retry 3 --retry-delay 5 \
-                -H "Accept: application/json" -A "MarsLiveStream/1.0" "$url" 2>/dev/null) || true
-            local batch_count=0
-            if command -v jq &>/dev/null; then
-                batch_count=$(echo "$resp" | jq '.images | length' 2>/dev/null || echo 0)
-            fi
-            [ "${batch_count:-0}" -eq 0 ] && break
-            if command -v jq &>/dev/null; then
-                local offset=${#ALL_FETCHED_IMAGES[@]}
-                mapfile -t -O "$offset" ALL_FETCHED_IMAGES < <(echo "$resp" | jq -r '.images[].image_files.large // .images[].image_files.medium // empty' 2>/dev/null)
-                mapfile -t -O "$offset" ALL_CAMERA_NAMES  < <(echo "$resp" | jq -r '.images[].camera.instrument // empty' 2>/dev/null)
-                mapfile -t -O "$offset" ALL_EARTH_DATES   < <(echo "$resp" | jq -r '.images[].date_taken_utc // empty' 2>/dev/null)
-                mapfile -t -O "$offset" ALL_SOL_TIMES     < <(echo "$resp" | jq -r '.images[].date_taken_mars // empty' 2>/dev/null)
-                mapfile -t -O "$offset" ALL_IMG_CAPTIONS  < <(echo "$resp" | jq -r '.images[].title // empty' 2>/dev/null)
-            fi
-            [ "$batch_count" -lt "$PAGE_SIZE" ] && break
-            fb_page=$((fb_page + 1))
-            sleep 0.3
-        done
-        TOTAL_FOR_SOL=${#ALL_FETCHED_IMAGES[@]}
-        echo "Fallback total (unfiltered) for Sol ${sol}: ${TOTAL_FOR_SOL}"
-    fi
+    echo "Color-image fetch done: ${TOTAL_FOR_SOL} color frames found (scanned ${RAW_TOTAL} raw frames across up to ${page} page(s))."
 
     if [ "$TOTAL_FOR_SOL" -eq 0 ]; then
-        echo "ERROR: No images at all (color or otherwise) for Sol ${sol}."
+        echo "ERROR: No color frames found in the scanned window. NOT falling back to grayscale - will retry next cycle."
         return 1
     fi
+
+    # Most recent Sol actually represented among the color frames we
+    # found - this is what gets shown as "Sol" on the dashboard/mission
+    # stats, even though the batch may span a few Sols back.
+    CURRENT_SOL="${ALL_SOL_NUMS[0]:-unknown}"
     return 0
 }
 
@@ -457,8 +420,9 @@ slice_next_batch() {
     EARTH_DATES=("${ALL_EARTH_DATES[@]:$OFFSET:$MAX_IMAGES}")
     SOL_TIMES=("${ALL_SOL_TIMES[@]:$OFFSET:$MAX_IMAGES}")
     IMG_CAPTIONS=("${ALL_IMG_CAPTIONS[@]:$OFFSET:$MAX_IMAGES}")
+    SOL_NUMS=("${ALL_SOL_NUMS[@]:$OFFSET:$MAX_IMAGES}")
 
-    echo "Batch: showing images ${BATCH_START}-${BATCH_END} of ${TOTAL_FOR_SOL} total color frames for Sol ${CURRENT_SOL}."
+    echo "Batch: showing color images ${BATCH_START}-${BATCH_END} of ${TOTAL_FOR_SOL} recent frames (latest Sol: ${CURRENT_SOL})."
     OFFSET=$((OFFSET + MAX_IMAGES))
 }
 
@@ -694,9 +658,13 @@ build_slide_info_chain() {
         local end=$((start + SLIDE_DURATION))
         local cam="${CAMERA_NAMES[$i]:-Unknown Camera}"
         local edate="${EARTH_DATES[$i]:-}"
+        # Each frame gets its OWN Sol number - the batch can span a few
+        # recent Sols now, so this is more accurate than always
+        # stamping the dashboard's single "latest Sol" on every frame.
+        local frame_sol="${SOL_NUMS[$i]:-$CURRENT_SOL}"
 
         printf 'TRANSMISSION FROM MARS\nSol %s  ·  Frame %d of %d\n%s' \
-            "$CURRENT_SOL" "$running_idx" "$TOTAL_FOR_SOL" "$cam" \
+            "$frame_sol" "$running_idx" "$TOTAL_FOR_SOL" "$cam" \
             > "$ASSET_DIR/slide_info$((i+1)).txt"
         if [ -n "$edate" ]; then
             local edate_short="${edate:0:16}"
@@ -928,10 +896,10 @@ build_full_filter() {
     F+="[mi3]drawtext=fontfile=${FONT}:expansion=none:text='Landing\: Feb 18\, 2021':fontcolor=white@0.85:fontsize=13:x=22:y=602[mi4];"
     F+="[mi4]drawtext=fontfile=${FONT}:expansion=none:text='Location\: Jezero Crater':fontcolor=white@0.85:fontsize=13:x=22:y=619[mi5];"
     F+="[mi5]drawtext=fontfile=${FONT}:expansion=none:text='Sol\: ${CURRENT_SOL}':fontcolor=${MARS_RED}:fontsize=15:x=22:y=638[mi6];"
-    # Uses the real total color-frame count for the Sol (TOTAL_FOR_SOL),
-    # not just this batch's DOWNLOAD_COUNT - grows automatically as
-    # NASA uplinks more images for the same Sol.
-    F+="[mi6]drawtext=fontfile=${FONT}:expansion=none:text='Images\: ${TOTAL_FOR_SOL} color frames today':fontcolor=white@0.75:fontsize=12:x=22:y=659[mi7];"
+    # Uses the real total color-frame count found in the recent scan
+    # (TOTAL_FOR_SOL), not just this batch's DOWNLOAD_COUNT - grows
+    # automatically as NASA uplinks more color images.
+    F+="[mi6]drawtext=fontfile=${FONT}:expansion=none:text='Images\: ${TOTAL_FOR_SOL} recent color frames':fontcolor=white@0.75:fontsize=12:x=22:y=659[mi7];"
 
     local CTA_ALPHA="if(between(mod(t\,${CTA_CYCLE})\,0\,${CTA_SHOW})\,if(lt(mod(t\,${CTA_CYCLE})\,0.5)\,mod(t\,${CTA_CYCLE})/0.5\,if(gt(mod(t\,${CTA_CYCLE})\,${CTA_SHOW}-0.5)\,(${CTA_SHOW}-mod(t\,${CTA_CYCLE}))/0.5\,1))\,0)"
     local CTA_ENABLE="between(mod(t\,${CTA_CYCLE})\,0\,${CTA_SHOW})"
@@ -1065,19 +1033,19 @@ echo ""
 
 prepare_music
 
-LAST_STREAMED_SOL=""
 CURRENT_SOL=""
-LATEST_SOL=""
 ALL_FETCHED_IMAGES=()
 ALL_CAMERA_NAMES=()
 ALL_EARTH_DATES=()
 ALL_SOL_TIMES=()
 ALL_IMG_CAPTIONS=()
+ALL_SOL_NUMS=()
 FETCHED_IMAGES=()
 CAMERA_NAMES=()
 EARTH_DATES=()
 SOL_TIMES=()
 IMG_CAPTIONS=()
+SOL_NUMS=()
 IMAGE_FILES=()
 OVERLAY_INPUT_IDX=0
 AUDIO_INPUT_IDX=0
@@ -1090,55 +1058,50 @@ TOTAL_FOR_SOL=0
 BATCH_START=0
 BATCH_END=0
 NEEDS_REFRESH=false
+HAVE_IMAGE_LIST=false
 
 while true; do
     echo "========================================"
     echo "New cycle starting at $(date -u +'%Y-%m-%d %H:%M UTC')"
     echo "========================================"
 
-    if probe_latest_sol; then
-        CURRENT_SOL="$LATEST_SOL"
-
-        if [ "$CURRENT_SOL" != "$LAST_STREAMED_SOL" ]; then
-            # New Sol - build the full color-image list from scratch and
-            # start paging through it from the beginning.
-            echo "New Sol detected ($CURRENT_SOL) - fetching full color-image list..."
-            if ! fetch_all_color_images_for_sol "$CURRENT_SOL"; then
-                echo "ERROR: could not fetch images for Sol $CURRENT_SOL. Retrying in 120s..."
-                sleep 120
-                continue
-            fi
-            OFFSET=0
-            LAST_STREAMED_SOL="$CURRENT_SOL"
-        fi
-
-        slice_next_batch
-        if [ "$NEEDS_REFRESH" = true ]; then
-            # We've shown every color image fetched for this Sol - check
-            # for any newly downlinked ones before wrapping back to the
-            # start, so the loop doesn't just repeat the same set forever.
-            echo "All ${TOTAL_FOR_SOL} color images for Sol $CURRENT_SOL have been shown - refreshing image list..."
-            if fetch_all_color_images_for_sol "$CURRENT_SOL"; then
-                OFFSET=0
-                slice_next_batch
-            fi
-        fi
-
-        download_images
-        write_panel_assets
-
-        N_SLIDES=$(ls "$IMAGES_DIR"/mars_sol*.jpg 2>/dev/null | wc -l | tr -d ' ')
-        if [ "$N_SLIDES" -eq 0 ]; then
-            echo "ERROR: No local images to show. Waiting 60s and retrying..."
-            sleep 60
+    if [ "$HAVE_IMAGE_LIST" = false ]; then
+        # First run: build the initial color-image list.
+        if ! fetch_recent_color_images; then
+            echo "ERROR: could not fetch any color images. Retrying in 120s..."
+            sleep 120
             continue
         fi
-
-        run_stream "$N_SLIDES" || true
-    else
-        echo "ERROR: Failed to determine latest Sol. Retrying in 120s..."
-        sleep 120
+        OFFSET=0
+        HAVE_IMAGE_LIST=true
     fi
+
+    slice_next_batch
+    if [ "$NEEDS_REFRESH" = true ]; then
+        # We've shown every color image in the current set - refetch
+        # (to pick up anything new NASA has downlinked since) before
+        # wrapping back to the start, so the loop doesn't just repeat
+        # the same set forever.
+        echo "All ${TOTAL_FOR_SOL} color images in the current set have been shown - refreshing image list..."
+        if fetch_recent_color_images; then
+            OFFSET=0
+            slice_next_batch
+        else
+            echo "WARNING: refresh failed - reusing the existing set for one more pass."
+        fi
+    fi
+
+    download_images
+    write_panel_assets
+
+    N_SLIDES=$(ls "$IMAGES_DIR"/mars_sol*.jpg 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$N_SLIDES" -eq 0 ]; then
+        echo "ERROR: No local images to show. Waiting 60s and retrying..."
+        sleep 60
+        continue
+    fi
+
+    run_stream "$N_SLIDES" || true
 
     echo ""
     echo "Cycle complete. Starting next cycle immediately to check for new Sol..."
