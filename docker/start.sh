@@ -15,20 +15,13 @@ set -euo pipefail
 #      caused by corrupt/HTML error downloads.
 #
 # NEW (background music / Ken Burns):
-#   3. Looping background music. Set MUSIC_URL_1,
-#      MUSIC_URL_2, MUSIC_URL_3, MUSIC_URL_4, ...
-#      (as many as you want - any number, not
-#      capped at 4) as secrets/env vars, each
-#      pointing to an audio file URL (mp3/aac/
-#      m4a/wav...). Each is downloaded once,
-#      validated independently, and all valid
-#      tracks are looped continuously
-#      (back-to-back, then repeat) as the
-#      stream's audio track. A legacy plain
-#      MUSIC_URL is still honored as an extra
-#      track for backward compatibility. If none
-#      are set/valid, falls back to silent audio
-#      like before - nothing breaks.
+#   3. Looping background music. Set MUSIC_URL
+#      (as a secret/env var) to an audio file
+#      URL (mp3/aac/m4a/wav...). It is downloaded
+#      once, then looped continuously (-stream_loop
+#      -1) as the stream's audio track. If unset
+#      or invalid, falls back to silent audio like
+#      before - nothing breaks.
 #   4. Documentary-style slideshow: every image
 #      now gets its own slow zoom/pan (Ken Burns)
 #      via zoompan, and consecutive images are
@@ -57,9 +50,9 @@ set -euo pipefail
 #      then page through it MAX_IMAGES at a time
 #      across cycles (an OFFSET that advances each
 #      loop). When we run out of new images, we
-#      refresh the set (to pick up anything new
-#      NASA has uploaded since) before wrapping
-#      back to the start.
+#      refresh the set (to pick up anything NASA has
+#      uploaded since) before wrapping back to the
+#      start.
 #   7. "Frame X of Y" / "Images: N recent color
 #      frames" now report the REAL total color-image
 #      count found (TOTAL_FOR_SOL) and the true
@@ -69,16 +62,6 @@ set -euo pipefail
 #      hardcoded against MAX_IMAGES. Each frame's
 #      caption also shows ITS OWN Sol number, since a
 #      batch can now span a few recent Sols.
-#
-# NEW (this revision, cont.):
-#   8. MULTI-TRACK MUSIC. Replaced the single
-#      MUSIC_URL with a numbered list
-#      (MUSIC_URL_1..N, any count). All valid
-#      tracks are concatenated into an ffconcat
-#      playlist that ffmpeg loops indefinitely
-#      (-stream_loop -1), so background music
-#      rotates through several songs instead of
-#      one track looping forever.
 #############################################
 
 #############################################
@@ -172,16 +155,8 @@ ROVER_LON="77.4509"
 STATUS_SLOT=15
 
 # --- Background music (loops for the whole stream) ---
-# Supports multiple tracks: MUSIC_URL_1, MUSIC_URL_2, MUSIC_URL_3,
-# MUSIC_URL_4, ... (any number - keeps reading MUSIC_URL_<n> until an
-# index is unset, so you're not capped at 4). They're downloaded once,
-# validated, and looped back-to-back continuously
-# (-stream_loop -1 over an ffconcat playlist) as the stream's audio
-# track. A legacy plain MUSIC_URL is still honored as an extra track
-# for backward compatibility. If none are set/valid, falls back to
-# silent audio - nothing breaks.
-MUSIC_DIR="$ASSET_DIR/bgm"
-MUSIC_PLAYLIST="$ASSET_DIR/bgm_playlist.txt"
+MUSIC_URL="${MUSIC_URL:-}"
+MUSIC_FILE="$ASSET_DIR/bgm_audio"
 HAVE_MUSIC=false
 
 mkdir -p "$ASSET_DIR" "$IMAGES_DIR"
@@ -254,92 +229,36 @@ ROVER_STATUSES=(
 )
 
 #############################################
-# Prepare looping background music playlist (once)
-#
-# Reads MUSIC_URL_1, MUSIC_URL_2, MUSIC_URL_3, ... - any number, it
-# just keeps going until it hits an unset index - plus a plain
-# MUSIC_URL for backward compatibility (treated as one more track).
-# Each URL is downloaded and validated independently; a bad/unreachable
-# URL is skipped with a warning instead of aborting the others. All
-# valid tracks are written into an ffconcat playlist file, which
-# ffmpeg then loops forever (-stream_loop -1) so the tracks play
-# back-to-back in order, then repeat.
+# Prepare looping background music (once)
 #############################################
 prepare_music() {
-    mkdir -p "$MUSIC_DIR"
-    local urls=()
-
-    # Legacy single-var support: if MUSIC_URL is set, it's included
-    # too (as an extra track), so existing setups keep working as-is.
-    [ -n "${MUSIC_URL:-}" ] && urls+=("$MUSIC_URL")
-
-    # Collect MUSIC_URL_1, MUSIC_URL_2, MUSIC_URL_3, ... for as long
-    # as consecutive indices are set. No hardcoded cap.
-    local i=1
-    while true; do
-        local varname="MUSIC_URL_${i}"
-        local val="${!varname:-}"
-        [ -z "$val" ] && break
-        urls+=("$val")
-        i=$((i + 1))
-    done
-
-    if [ "${#urls[@]}" -eq 0 ]; then
-        echo "NOTICE: no MUSIC_URL / MUSIC_URL_1, MUSIC_URL_2, ... set - streaming with silent audio track."
+    if [ -z "$MUSIC_URL" ]; then
+        echo "NOTICE: MUSIC_URL not set - streaming with silent audio track."
         return
     fi
 
     echo "----------------------------------------"
-    echo "Downloading ${#urls[@]} background music track(s)..."
+    echo "Downloading background music from MUSIC_URL..."
     echo "----------------------------------------"
 
-    rm -f "$MUSIC_DIR"/track_*
-    : > "$MUSIC_PLAYLIST"
-
-    local track_n=0
-    local url
-    for url in "${urls[@]}"; do
-        track_n=$((track_n + 1))
-        local outfile="$MUSIC_DIR/track_$(printf '%03d' "$track_n")"
-
-        local attempt=1
-        local ok=false
-        while [ "$attempt" -le 3 ]; do
-            if curl -sSL --max-time 60 -o "$outfile" "$url"; then
-                if [ -s "$outfile" ] && ffprobe -v error -select_streams a:0 \
-                    -show_entries stream=codec_type -of csv=p=0 "$outfile" 2>/dev/null | grep -q audio; then
-                    ok=true
-                    break
-                fi
+    local attempt=1
+    while [ "$attempt" -le 3 ]; do
+        if curl -sSL --max-time 60 -o "$MUSIC_FILE" "$MUSIC_URL"; then
+            if [ -s "$MUSIC_FILE" ] && ffprobe -v error -select_streams a:0 \
+                -show_entries stream=codec_type -of csv=p=0 "$MUSIC_FILE" 2>/dev/null | grep -q audio; then
+                echo "Music downloaded and validated: $MUSIC_FILE"
+                HAVE_MUSIC=true
+                return
             fi
-            echo "  Track ${track_n} download/validation failed (attempt ${attempt}/3), retrying..."
-            rm -f "$outfile"
-            attempt=$((attempt + 1))
-            sleep 3
-        done
-
-        if [ "$ok" = true ]; then
-            echo "  Track ${track_n} OK: ${outfile}"
-            # ffconcat needs the path single-quoted; escape any literal
-            # single quotes in it just in case.
-            local escaped="${outfile//\'/\'\\\'\'}"
-            printf "file '%s'\n" "$escaped" >> "$MUSIC_PLAYLIST"
-        else
-            echo "  WARNING: Track ${track_n} (${url}) could not be fetched/validated - skipping it."
-            rm -f "$outfile"
         fi
+        echo "  Music download/validation failed (attempt ${attempt}/3), retrying..."
+        rm -f "$MUSIC_FILE"
+        attempt=$((attempt + 1))
+        sleep 3
     done
 
-    local valid_tracks
-    valid_tracks=$(wc -l < "$MUSIC_PLAYLIST" | tr -d ' ')
-    if [ "${valid_tracks:-0}" -eq 0 ]; then
-        echo "WARNING: none of the configured music URLs were valid - falling back to silent audio."
-        HAVE_MUSIC=false
-        return
-    fi
-
-    echo "Music playlist ready: ${valid_tracks} valid track(s) will loop continuously."
-    HAVE_MUSIC=true
+    echo "WARNING: Could not fetch valid audio from MUSIC_URL - falling back to silent audio."
+    HAVE_MUSIC=false
 }
 
 #############################################
@@ -1040,11 +959,7 @@ echo "Cycle duration: ${CYCLE_DURATION} seconds"
     INPUT_ARGS+=(-loop 1 -i overlay.png)
 
     if [ "$HAVE_MUSIC" = true ]; then
-        # concat demuxer plays every valid track in the playlist
-        # back-to-back in order; -stream_loop -1 then loops that whole
-        # playlist forever, so multiple tracks rotate continuously
-        # instead of one file just repeating.
-        INPUT_ARGS+=(-stream_loop -1 -re -f concat -safe 0 -i "$MUSIC_PLAYLIST")
+        INPUT_ARGS+=(-stream_loop -1 -re -i "$MUSIC_FILE")
     else
         INPUT_ARGS+=(-f lavfi -i anullsrc=r=48000:cl=stereo)
     fi
