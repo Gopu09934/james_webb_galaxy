@@ -104,6 +104,8 @@ STATUS_SLOT=15
 MUSIC_URL="${MUSIC_URL:-}"
 MUSIC_FILE="$ASSET_DIR/bgm_audio"
 HAVE_MUSIC=false
+MUSIC_DURATION=0
+MUSIC_START_EPOCH=$(date +%s)
 
 # --- Trapezoid panel image (generated once at startup) ---
 PANEL_PNG="$ASSET_DIR/panels.png"
@@ -234,6 +236,11 @@ prepare_music() {
                 -show_entries stream=codec_type -of csv=p=0 "$MUSIC_FILE" 2>/dev/null | grep -q audio; then
                 echo "Music downloaded and validated: $MUSIC_FILE"
                 HAVE_MUSIC=true
+                MUSIC_DURATION=$(ffprobe -v error -show_entries format=duration \
+                    -of csv=p=0 "$MUSIC_FILE" 2>/dev/null | cut -d. -f1)
+                MUSIC_DURATION="${MUSIC_DURATION:-0}"
+                echo "Music length: ${MUSIC_DURATION}s (will continue seamlessly across cycles)"
+                MUSIC_START_EPOCH=$(date +%s)
                 return
             fi
         fi
@@ -861,13 +868,21 @@ run_stream() {
     INPUT_ARGS+=(-loop 1 -i overlay.png)
     INPUT_ARGS+=(-loop 1 -i "$PANEL_PNG")
 
-    if [ "$HAVE_MUSIC" = true ]; then
-        INPUT_ARGS+=(-stream_loop -1 -re -i "$MUSIC_FILE")
-    else
-        INPUT_ARGS+=(-f lavfi -i anullsrc=r=48000:cl=stereo)
-    fi
-
     while [ "$attempt" -le "$MAX_RETRIES" ]; do
+        # Audio input is rebuilt every attempt so the music resumes exactly
+        # where it would be had it played continuously since stream start.
+        local AUDIO_ARGS=()
+        if [ "$HAVE_MUSIC" = true ]; then
+            local seek=0
+            if [ "${MUSIC_DURATION:-0}" -gt 1 ]; then
+                seek=$(( ( $(date +%s) - MUSIC_START_EPOCH ) % MUSIC_DURATION ))
+            fi
+            echo "Music resuming at ${seek}s of ${MUSIC_DURATION}s"
+            AUDIO_ARGS=(-ss "$seek" -stream_loop -1 -re -i "$MUSIC_FILE")
+        else
+            AUDIO_ARGS=(-f lavfi -i anullsrc=r=48000:cl=stereo)
+        fi
+
         echo "----------------------------------------"
         echo "Streaming Sol $CURRENT_SOL ($n_slides slides, batch ${BATCH_START}-${BATCH_END} of ${TOTAL_FOR_SOL}, music=${HAVE_MUSIC}) - attempt ${attempt}/${MAX_RETRIES}"
         echo "----------------------------------------"
@@ -876,6 +891,7 @@ run_stream() {
         -hide_banner \
         -loglevel info \
         "${INPUT_ARGS[@]}" \
+        "${AUDIO_ARGS[@]}" \
         -filter_complex_script "$filter_script" \
         -map "[final]" \
         -map "${AUDIO_INPUT_IDX}:a" \
