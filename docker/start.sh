@@ -3,29 +3,22 @@ set -euo pipefail
 
 #############################################
 # MARS 2020 PERSEVERANCE ROVER - LIVE STREAM
-# Fetches latest color images from NASA and
-# streams a Ken Burns slideshow to YouTube.
+# Fetches the latest Front Hazcam images from
+# NASA and streams a Ken Burns slideshow to
+# YouTube.
 #
 # (All earlier features unchanged: paginated
 #  fetch, JPEG validation, looping background
 #  music, Ken Burns + xfade transitions,
-#  color-only camera allowlist, batch paging
-#  with real "Frame X of Y" counters.)
+#  batch paging with real "Frame X of Y"
+#  counters, trapezoid panel layout.)
 #
-# NEW (this revision) - PANEL LAYOUT:
-#   The old full-height left sidebar is gone.
-#   The video now uses the whole frame, and the
-#   info lives in two trapezoid panels:
-#     TOP PANEL    : LIVE, clock, title, sol header,
-#                    mission line, rotating Mars fact,
-#                    slide progress bar, subs/viewers,
-#                    credits, channel name
-#     BOTTOM PANEL : live telemetry, sol/days/location,
-#                    rotating rover status, news ticker
-#   The trapezoid shapes are rendered once into
-#   panel_assets/panels.png (ffmpeg geq) and
-#   overlaid on the video. Per-slide info box moved
-#   to bottom-left, subscribe CTA to bottom-right.
+# NEW (this revision) - CAMERA FILTER:
+#   Only Engineering Cameras:
+#     - Front Hazcam - Left
+#     - Front Hazcam - Right
+#   (A and B computer-string variants of each
+#    are both accepted.)
 #############################################
 
 #############################################
@@ -46,6 +39,7 @@ fi
 
 echo "========================================"
 echo "Starting Mars 2020 Perseverance Rover Stream"
+echo "Cameras           : Front Hazcam Left / Right"
 echo "Output Resolution : 1280x720 (720p)"
 echo "FPS               : 30"
 echo "========================================"
@@ -69,21 +63,19 @@ INFO_LINE_SPACING=8
 
 MAX_IMAGES=10
 PAGE_SIZE=100
-MAX_FETCH_PAGES=40
+MAX_FETCH_PAGES=80
 COLOR_TARGET=250
 VIEWER_MIN_TO_SHOW=10
 
-# --- Color-camera allowlist -----------------------------------------
+# --- Camera allowlist: Engineering cameras - Front Hazcam only ------
+# Front Hazcams have A/B string variants, so all four instrument
+# names are listed to avoid missing frames when the rover switches
+# computers.
 COLOR_CAMERAS=(
-    "MCZ_LEFT"
-    "MCZ_RIGHT"
-    "SHERLOC_WATSON"
-    "EDL_RUCAM"
-    "EDL_DDCAM"
-    "EDL_PUCAM1"
-    "EDL_PUCAM2"
-    "LCAM"
-    "SKYCAM"
+    "FRONT_HAZCAM_LEFT_A"
+    "FRONT_HAZCAM_RIGHT_A"
+    "FRONT_HAZCAM_LEFT_B"
+    "FRONT_HAZCAM_RIGHT_B"
 )
 
 SUB_ICON_X=1249
@@ -150,6 +142,7 @@ MARS_FACTS=(
     "RIMFAX radar on Perseverance can peer up to 10 meters below the Martian surface."
     "Scientists study Mars to understand the history of water in our solar system."
     "Mars missions help us plan for future human exploration of the Red Planet."
+    "Hazcams help Perseverance spot rocks and hazards right in front of its wheels."
 )
 
 #############################################
@@ -267,13 +260,14 @@ build_color_cameras_json() {
 #
 # Paginates the raw feed newest-first (no Sol
 # lock) and keeps ONLY frames whose
-# camera.instrument matches COLOR_CAMERAS.
+# camera.instrument matches the allowlist
+# (Front Hazcam Left / Right).
 # Populates the ALL_* arrays, TOTAL_FOR_SOL and
 # CURRENT_SOL (most recent Sol represented).
 #############################################
 fetch_recent_color_images() {
     echo "----------------------------------------"
-    echo "Fetching recent color images (Mastcam-Z / WATSON / EDL / etc.)..."
+    echo "Fetching recent Front Hazcam images (Left / Right)..."
     echo "----------------------------------------"
 
     build_color_cameras_json
@@ -290,7 +284,7 @@ fetch_recent_color_images() {
     local page=0
     while [ "$page" -lt "$MAX_FETCH_PAGES" ] && [ "${#ALL_FETCHED_IMAGES[@]}" -lt "$COLOR_TARGET" ]; do
         local url="${BASE_URL}&num=${PAGE_SIZE}&page=${page}"
-        echo "  Page $page | color frames so far: ${#ALL_FETCHED_IMAGES[@]} (raw seen: ${RAW_TOTAL})"
+        echo "  Page $page | Hazcam frames so far: ${#ALL_FETCHED_IMAGES[@]} (raw seen: ${RAW_TOTAL})"
         local resp
         resp=$(curl -sSL --max-time 60 --retry 3 --retry-delay 5 \
             -H "Accept: application/json" \
@@ -325,7 +319,7 @@ fetch_recent_color_images() {
             mapfile -t -O "$offset" ALL_SOL_NUMS < <(echo "$resp" | jq -r --argjson colors "$COLOR_CAMERAS_JSON" \
                 '.images[] | select(.camera.instrument as $i | $colors | index($i) != null) | (.sol // empty)' 2>/dev/null)
         else
-            echo "ERROR: jq is required to filter by camera color (so grayscale frames never slip through) - install jq."
+            echo "ERROR: jq is required to filter by camera (Front Hazcam only) - install jq."
             return 1
         fi
 
@@ -338,10 +332,10 @@ fetch_recent_color_images() {
     done
 
     TOTAL_FOR_SOL=${#ALL_FETCHED_IMAGES[@]}
-    echo "Color-image fetch done: ${TOTAL_FOR_SOL} color frames found (scanned ${RAW_TOTAL} raw frames across up to ${page} page(s))."
+    echo "Hazcam fetch done: ${TOTAL_FOR_SOL} Front Hazcam frames found (scanned ${RAW_TOTAL} raw frames across up to ${page} page(s))."
 
     if [ "$TOTAL_FOR_SOL" -eq 0 ]; then
-        echo "ERROR: No color frames found in the scanned window. NOT falling back to grayscale - will retry next cycle."
+        echo "ERROR: No Front Hazcam frames found in the scanned window. Will retry next cycle."
         return 1
     fi
 
@@ -376,7 +370,7 @@ slice_next_batch() {
     IMG_CAPTIONS=("${ALL_IMG_CAPTIONS[@]:$OFFSET:$MAX_IMAGES}")
     SOL_NUMS=("${ALL_SOL_NUMS[@]:$OFFSET:$MAX_IMAGES}")
 
-    echo "Batch: showing color images ${BATCH_START}-${BATCH_END} of ${TOTAL_FOR_SOL} recent frames (latest Sol: ${CURRENT_SOL})."
+    echo "Batch: showing Hazcam images ${BATCH_START}-${BATCH_END} of ${TOTAL_FOR_SOL} recent frames (latest Sol: ${CURRENT_SOL})."
     OFFSET=$((OFFSET + MAX_IMAGES))
 }
 
@@ -486,7 +480,7 @@ write_panel_assets() {
     printf 'LIVE FROM THE RED PLANET'           > "$ASSET_DIR/eyebrow.txt"
     printf 'SUBSCRIBE for daily Mars updates'   > "$ASSET_DIR/cta.txt"
     printf 'MARS FACT'                          > "$ASSET_DIR/fact_label.txt"
-    printf 'Perseverance  •  Landed Feb 18, 2021  •  Jezero Crater  •  %s color frames' "$TOTAL_FOR_SOL" > "$ASSET_DIR/mission.txt"
+    printf 'Perseverance  •  Landed Feb 18, 2021  •  Jezero Crater  •  %s Hazcam frames' "$TOTAL_FOR_SOL" > "$ASSET_DIR/mission.txt"
 
     local i idx
     local SHUFFLED_FACTS=()
@@ -592,7 +586,7 @@ build_slideshow_filter() {
 #############################################
 # Build per-slide info overlay
 #
-# Now sits at the BOTTOM-LEFT of the video
+# Sits at the BOTTOM-LEFT of the video
 # (x=20..370, y=560..678) - clear of the bottom
 # trapezoid panel.
 #############################################
@@ -607,6 +601,7 @@ build_slide_info_chain() {
         local start=$((i * SLIDE_DURATION))
         local end=$((start + SLIDE_DURATION))
         local cam="${CAMERA_NAMES[$i]:-Unknown Camera}"
+        cam="${cam//_/ }"   # FRONT_HAZCAM_LEFT_A -> FRONT HAZCAM LEFT A
         local edate="${EARTH_DATES[$i]:-}"
         local frame_sol="${SOL_NUMS[$i]:-$CURRENT_SOL}"
 
@@ -813,7 +808,7 @@ build_full_filter() {
     add "drawbox=x=880:y=640:w=4:h=43:color=${MARS_RED}:t=fill"
     add "drawbox=x=898:y=656:w=11:h=11:color=${RED}:t=fill:enable='${CTA_ENABLE}'"
     add "drawtext=fontfile=${FONT}:expansion=none:textfile=${ASSET_DIR}/cta.txt:fontcolor=white:fontsize=16:x=917:y=654:alpha='${CTA_ALPHA}'"
-    add "drawtext=fontfile=${FONT}:expansion=none:text='Latest View from Perseverance rover':fontcolor=white@0.80:fontsize=16:x=898:y=654:enable='not(${CTA_ENABLE})'"
+    add "drawtext=fontfile=${FONT}:expansion=none:text='Front Hazcam View - Perseverance':fontcolor=white@0.80:fontsize=16:x=898:y=654:enable='not(${CTA_ENABLE})'"
 
     # Subscribe-button pulse ring
     local SUB_PULSE_ENABLE="lt(mod(t\,3)\,1)"
@@ -970,7 +965,7 @@ while true; do
 
     if [ "$HAVE_IMAGE_LIST" = false ]; then
         if ! fetch_recent_color_images; then
-            echo "ERROR: could not fetch any color images. Retrying in 120s..."
+            echo "ERROR: could not fetch any Front Hazcam images. Retrying in 120s..."
             sleep 120
             continue
         fi
@@ -980,7 +975,7 @@ while true; do
 
     slice_next_batch
     if [ "$NEEDS_REFRESH" = true ]; then
-        echo "All ${TOTAL_FOR_SOL} color images in the current set have been shown - refreshing image list..."
+        echo "All ${TOTAL_FOR_SOL} Hazcam images in the current set have been shown - refreshing image list..."
         if fetch_recent_color_images; then
             OFFSET=0
             slice_next_batch
