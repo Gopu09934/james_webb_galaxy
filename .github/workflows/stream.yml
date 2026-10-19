@@ -3,15 +3,13 @@ on:
   workflow_dispatch:
     inputs:
       auto_restart:
-        description: 'Set automatically by the chain — leave unchecked for manual runs (forces a fresh rebuild)'
+        description: 'Set automatically by the restart workflow — leave unchecked for manual runs (forces a fresh rebuild)'
         required: false
         type: boolean
         default: false
   schedule:
-    # Safety net: restarts the chain if it ever breaks
-    - cron: "17 * * * *"
+   - cron: "0 */5 * * *"
 
-# Only one stream at a time; the next run waits (queued) until this one ends.
 concurrency:
   group: stream-job
   cancel-in-progress: true
@@ -19,24 +17,12 @@ concurrency:
 permissions:
   contents: read
   packages: write
-  actions: write   # lets the job queue its own successor
 
 jobs:
   stream:
     runs-on: ubuntu-latest
-    timeout-minutes: 355   # GitHub-hosted runners stop jobs at 6 hours
+    timeout-minutes: 360
     steps:
-      # Queue the next segment now. It waits via concurrency and starts the
-      # moment this one ends. auto_restart=true makes it reuse the cached image.
-      - name: Queue next segment
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh workflow run "${{ github.workflow }}" \
-            --repo "${{ github.repository }}" \
-            --ref "${{ github.ref_name }}" \
-            -f auto_restart=true
-
       - name: Determine build mode
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.event.inputs.auto_restart }}" != "true" ]; then
@@ -84,5 +70,5 @@ jobs:
             -e YOUTUBE_STREAM_KEY="${{ secrets.YOUTUBE_STREAM_KEY }}" \
             -e YOUTUBE_API_KEY="${{ secrets.YOUTUBE_API_KEY }}" \
             -e YOUTUBE_CHANNEL_ID="${{ secrets.YOUTUBE_CHANNEL_ID }}" \
-            -e MUSIC_URL="${{ secrets.MUSIC_URL }}" \
+             -e MUSIC_URL="${{ secrets.MUSIC_URL }}" \
             "$IMAGE:latest"
