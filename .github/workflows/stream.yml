@@ -14,7 +14,7 @@ on:
 # Only one stream at a time; the next run waits (queued) until this one ends.
 concurrency:
   group: stream-job
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 permissions:
   contents: read
